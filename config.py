@@ -87,15 +87,18 @@ Context — recent application logs:
 {app_logs}
 
 Use these logs to inform your decision. Look for:
-- Which commands/features are used most frequently
-- Recently shipped features and whether they are seeing adoption
+- Gaps in functionality — what could the app do that it doesn't yet?
+- Which commands/features are used most frequently (inspiration for complementary features)
 - Recurring errors or friction points users hit
-- Opportunities to refine popular features for stickiness
+
+IMPORTANT: Strongly prefer proposing NEW features and capabilities over refactoring,
+cleanup, or incremental polish of existing functionality. Think about what would make
+users say "oh cool, it can do THAT now?" rather than small quality-of-life tweaks.
 If no logs are available, base your decision on the codebase alone.
 
 Instructions:
 1. Review the codebase at {working_dir} and any existing backlog items in {backlog_dir}.
-2. Identify the most impactful improvement or feature to build next.
+2. Identify the most impactful NEW feature to build next.
 3. Write a JSON spec file to {backlog_dir}/ with this exact format:
    {{
      "title": "short-kebab-title",
