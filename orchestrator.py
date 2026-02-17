@@ -148,6 +148,9 @@ class Supervisor:
         self.last_launch_times: dict[str, float] = {}  # agent name → last launch timestamp
         self._eng_edits_tallied: bool = False  # True once edits counted for current Eng run
 
+        # SRE high-water mark: only analyze new log lines since last run
+        self.sre_log_offsets: dict[str, int] = {}  # project_dir → byte offset in app.log
+
         # Recover orphaned .in_progress specs from previous runs
         self._recover_orphaned_specs()
 
@@ -312,6 +315,41 @@ class Supervisor:
             capture_output=True, text=True,
         )
         return result.stdout
+
+    def _read_new_log_lines(self, project_dir: str) -> str:
+        """Read only log lines written since the last SRE run (high-water mark)."""
+        log_path = os.path.join(project_dir, "app.log")
+        if not os.path.exists(log_path):
+            return ""
+
+        if project_dir not in self.sre_log_offsets:
+            # First run: fall back to tail, then store current EOF offset
+            tail = self._read_app_log_tail(project_dir, 100)
+            try:
+                self.sre_log_offsets[project_dir] = os.path.getsize(log_path)
+            except OSError:
+                pass
+            return tail
+
+        stored_offset = self.sre_log_offsets[project_dir]
+        try:
+            file_size = os.path.getsize(log_path)
+        except OSError:
+            return ""
+
+        # Log rotation: file shrank below stored offset → reset to start
+        if file_size < stored_offset:
+            stored_offset = 0
+
+        if file_size == stored_offset:
+            return ""  # No new content
+
+        with open(log_path, "r") as f:
+            f.seek(stored_offset)
+            new_content = f.read()
+
+        self.sre_log_offsets[project_dir] = file_size
+        return new_content
 
     def _is_self_project(self, working_dir: str | None) -> bool:
         """Return True if the spec targets the agent-team orchestrator itself."""
@@ -640,7 +678,7 @@ class Supervisor:
             )
             return
 
-        log_lines = self._read_app_log_tail(project_dir, 100)
+        log_lines = self._read_new_log_lines(project_dir)
         if not log_lines:
             return
 
