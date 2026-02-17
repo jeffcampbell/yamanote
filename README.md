@@ -71,7 +71,7 @@ agent-team/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/agent-team.git
+git clone https://github.com/jeffcampbell/agent-team.git
 cd agent-team
 ```
 
