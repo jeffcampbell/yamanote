@@ -175,6 +175,20 @@ class Supervisor:
                 return (1, path)
         return sorted(specs, key=sort_key)
 
+    def _sre_open_bugs(self) -> list[dict]:
+        """Return spec dicts for open SRE-authored bugs (both .json and .json.in_progress)."""
+        bugs = []
+        for pattern in ("*.json", "*.json.in_progress"):
+            for path in glob.glob(os.path.join(config.BACKLOG_DIR, pattern)):
+                try:
+                    with open(path) as f:
+                        data = json.load(f)
+                    if data.get("created_by") == "sre":
+                        bugs.append(data)
+                except (json.JSONDecodeError, OSError):
+                    continue
+        return bugs
+
     def _is_agent_active(self, name: str) -> bool:
         agent = self.active_agents.get(name)
         if agent is None:
@@ -617,17 +631,35 @@ class Supervisor:
         if not project_dir:
             project_dir = os.path.join(config.DEVELOPMENT_DIR, config.DEFAULT_PROJECT)
 
+        # Layer 1: hard cap on open SRE bugs
+        open_bugs = self._sre_open_bugs()
+        if len(open_bugs) >= config.MAX_SRE_OPEN_BUGS:
+            activity(
+                f"SRE SKIPPED — {len(open_bugs)} open SRE bugs "
+                f"(cap {config.MAX_SRE_OPEN_BUGS})"
+            )
+            return
+
         log_lines = self._read_app_log_tail(project_dir, 100)
         if not log_lines:
             return
 
+        # Layer 2: pass existing bug titles into prompt for LLM dedup
+        if open_bugs:
+            existing_bugs_text = "\n".join(
+                f"- {bug.get('title', '(untitled)')}" for bug in open_bugs
+            )
+        else:
+            existing_bugs_text = "(none)"
+
         ts = time.strftime("%Y%m%d_%H%M%S")
-        activity(f"SRE — analyzing app.log in {project_dir}")
+        activity(f"SRE — analyzing app.log in {project_dir} ({len(open_bugs)} open SRE bugs)")
         prompt = config.SRE_PROMPT.format(
             log_lines=log_lines,
             timestamp=ts,
             working_dir=project_dir,
             backlog_dir=config.BACKLOG_DIR,
+            existing_bugs=existing_bugs_text,
         )
         self._launch_agent("sre", prompt, cwd=project_dir)
 

@@ -70,6 +70,7 @@ AGENT_ERROR_COOLDOWN = 120         # seconds to wait before retrying an agent af
 MAX_ERROR_BACKOFF = 3600           # max backoff cap (1 hour) for exponential retry
 ENTROPY_FIX_COMMIT_THRESHOLD = 5   # "fix"/"update" commits on a branch before firing eng
 MAX_AGENT_LAUNCHES_PER_HOUR = 30   # cost guardrail — sleep mode after this many
+MAX_SRE_OPEN_BUGS = 3              # skip SRE launch if this many SRE bugs are already open
 SELF_PROJECT_DIR = BASE_DIR        # agents must not work on the orchestrator itself
 
 # ─── Agent system prompts ────────────────────────────────────────────────────
@@ -176,12 +177,19 @@ You are the SRE agent. Your job is to monitor application health and file bug re
 
 The project is located at: {working_dir}
 
+Currently open SRE bug tickets (do NOT file duplicates):
+{existing_bugs}
+
 Instructions:
 1. Analyze the following recent log lines from the application:
 {log_lines}
 
 2. Look for errors, exceptions, performance issues, or warning patterns.
-3. If you find a significant issue, create a bug ticket as a JSON file in {backlog_dir}/ with:
+3. IMPORTANT: If the issue you find is already covered by one of the open bugs
+   listed above, do NOT create a new ticket. Simply report
+   "Issue already tracked: <title>" to stdout.
+4. Only if you find a NEW issue not covered above, create a bug ticket as a JSON
+   file in {backlog_dir}/ with:
    {{
      "title": "bug-short-description",
      "description": "Detailed description of the issue found in logs, including relevant log lines.",
@@ -190,7 +198,7 @@ Instructions:
      "working_dir": "{working_dir}"
    }}
    Name it: {timestamp}_bug_{{summary}}.json
-4. If logs look healthy, simply report "No issues found" to stdout.
+5. If logs look healthy, simply report "No issues found" to stdout.
 """
 
 SUPERVISOR_PROMPT = """\
