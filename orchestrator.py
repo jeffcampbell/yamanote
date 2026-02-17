@@ -634,9 +634,9 @@ class Supervisor:
         # Layer 1: hard cap on open SRE bugs
         open_bugs = self._sre_open_bugs()
         if len(open_bugs) >= config.MAX_SRE_OPEN_BUGS:
-            activity(
-                f"SRE SKIPPED — {len(open_bugs)} open SRE bugs "
-                f"(cap {config.MAX_SRE_OPEN_BUGS})"
+            log.debug(
+                "SRE skipped — %d open SRE bugs (cap %d)",
+                len(open_bugs), config.MAX_SRE_OPEN_BUGS,
             )
             return
 
@@ -653,7 +653,7 @@ class Supervisor:
             existing_bugs_text = "(none)"
 
         ts = time.strftime("%Y%m%d_%H%M%S")
-        activity(f"SRE — analyzing app.log in {project_dir} ({len(open_bugs)} open SRE bugs)")
+        log.debug("SRE launching — analyzing app.log in %s (%d open SRE bugs)", project_dir, len(open_bugs))
         prompt = config.SRE_PROMPT.format(
             log_lines=log_lines,
             timestamp=ts,
