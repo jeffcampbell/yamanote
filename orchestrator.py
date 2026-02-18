@@ -139,6 +139,7 @@ class Supervisor:
         self.current_working_dir: str | None = None
         self.rework_counts: dict[str, int] = {}
         self.spec_timeout_counts: dict[str, int] = {}  # spec path → timeout streak
+        self._pm_skip_logged_branch: str | None = None
 
         # Cost guardrail: track agent launches in a rolling window
         self.launch_times: deque[float] = deque()
@@ -539,11 +540,6 @@ class Supervisor:
 
     # ─── Phases ──────────────────────────────────────────────────────────
 
-    def _has_unmerged_feature_branches(self, cwd: str) -> bool:
-        """Return True if any feature/* branches exist in the given repo."""
-        result = self._git("branch", "--list", "feature/*", cwd=cwd)
-        return bool(result.strip())
-
     def _phase_pm(self):
         """If backlog is empty and no PM running, launch PM agent."""
         if self._is_agent_active("pm"):
@@ -559,20 +555,24 @@ class Supervisor:
         if not os.path.isdir(default_dir):
             default_dir = config.DEVELOPMENT_DIR
 
-        # Don't generate new specs while feature branches are still in flight
-        if self._has_unmerged_feature_branches(default_dir):
+        # Don't generate new specs while eng→review→merge pipeline is active
+        if self.current_eng_branch:
+            if self._pm_skip_logged_branch != self.current_eng_branch:
+                activity(f"PM — skipped, eng pipeline active on {self.current_eng_branch}")
+                self._pm_skip_logged_branch = self.current_eng_branch
             return
 
         ts = time.strftime("%Y%m%d_%H%M%S")
         app_logs = self._read_app_log_tail(default_dir) or "(no app.log found)"
-        activity(f"PM — backlog empty, generating spec for {default_dir}")
         prompt = config.PM_PROMPT.format(
             timestamp=ts,
             working_dir=default_dir,
             backlog_dir=config.BACKLOG_DIR,
             app_logs=app_logs,
         )
-        self._launch_agent("pm", prompt, cwd=default_dir)
+        agent = self._launch_agent("pm", prompt, cwd=default_dir)
+        if agent is not None:
+            activity(f"PM — backlog empty, generating spec for {default_dir}")
 
     def _phase_eng(self):
         """If backlog has specs and no Eng running, pick oldest spec and launch Eng."""
@@ -891,6 +891,11 @@ class Supervisor:
 
         activity(f"MERGED — branch {self.current_eng_branch} merged to trunk.")
         self.last_merge_commit = current_head
+
+        # Delete the feature branch now that it's merged
+        if self._git_has_branch(self.current_eng_branch, cwd=cwd):
+            self._git("checkout", config.TRUNK_BRANCH, cwd=cwd)
+            self._git("branch", "-D", self.current_eng_branch, cwd=cwd)
 
         # Notify Discord before cleaning up state
         if self.current_eng_spec:
