@@ -610,6 +610,13 @@ class Supervisor:
         self.current_eng_branch = branch_name
         self.current_working_dir = working_dir
 
+        # If the feature branch already exists with changes (e.g. orphaned spec from
+        # a prior run that actually completed), skip ENG and go straight to review.
+        if self._git_has_branch(branch_name, cwd=working_dir) and self._git_diff_trunk(branch_name, cwd=working_dir):
+            activity(f"ENG — branch {branch_name} already has changes, routing to reviewer (orphan recovery)")
+            os.rename(spec_path, spec_path + ".in_progress")
+            return
+
         spec_desc = spec_data.get("description", "")
         activity(f"ENG — starting spec '{spec_title}' in {working_dir}")
         activity(f"  SPEC: {spec_desc}")
