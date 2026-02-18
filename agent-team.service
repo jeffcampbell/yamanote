@@ -7,7 +7,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/Development/agent-team
 ExecStart=/usr/bin/python3 /home/pi/Development/agent-team/orchestrator.py
-Restart=on-failure
+Restart=always
 RestartSec=30
 Environment=PATH=/home/pi/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-/home/pi/Development/agent-team/.env

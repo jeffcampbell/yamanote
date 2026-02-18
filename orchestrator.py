@@ -130,6 +130,7 @@ class Supervisor:
             "reviewer": None,
             "sre": None,
             "supervisor": None,
+            "meta": None,
         }
         self.eng_file_edits: dict[str, int] = {}
         self.last_merge_commit: str | None = None
@@ -150,6 +151,12 @@ class Supervisor:
 
         # SRE high-water mark: only analyze new log lines since last run
         self.sre_log_offsets: dict[str, int] = {}  # project_dir → byte offset in app.log
+
+        # Meta agent: track HEAD before meta launch to detect new commits
+        self._meta_head_before: str | None = None
+
+        # Don't run meta immediately on startup — wait for activity to accumulate
+        self.last_launch_times["meta"] = time.time()
 
         # Recover orphaned .in_progress specs from previous runs
         self._recover_orphaned_specs()
@@ -350,6 +357,33 @@ class Supervisor:
 
         self.sre_log_offsets[project_dir] = file_size
         return new_content
+
+    def _gather_meta_context(self) -> tuple[str, str]:
+        """Collect diagnostic data for the meta agent."""
+        activity_tail = ""
+        if os.path.exists(config.ACTIVITY_LOG):
+            result = subprocess.run(
+                ["tail", "-n", "100", config.ACTIVITY_LOG],
+                capture_output=True, text=True,
+            )
+            activity_tail = result.stdout
+        git_log = self._git("log", "--oneline", "-10", cwd=config.BASE_DIR)
+        return activity_tail, git_log
+
+    def _request_self_restart(self):
+        """Gracefully terminate all agents and exit for systemd to restart."""
+        activity("META RESTART — new commits detected, restarting orchestrator...")
+        for name, agent in self.active_agents.items():
+            if agent and agent.proc and agent.proc.poll() is None:
+                activity(f"Terminating {name} (PID {agent.proc.pid})")
+                agent.proc.terminate()
+                try:
+                    agent.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    agent.proc.kill()
+                agent.save_log()
+        activity("All agents stopped. Exiting for restart.")
+        sys.exit(0)
 
     def _is_self_project(self, working_dir: str | None) -> bool:
         """Return True if the spec targets the agent-team orchestrator itself."""
@@ -801,6 +835,34 @@ class Supervisor:
         self.current_eng_spec = None
         self.current_working_dir = None
 
+    def _phase_meta(self):
+        """Periodically analyze orchestrator activity and implement small improvements."""
+        if self._is_agent_active("meta"):
+            return
+
+        # If meta just completed, check for new commits → restart
+        if self._meta_head_before is not None:
+            current_head = self._git_last_commit(cwd=config.BASE_DIR)
+            if current_head != self._meta_head_before:
+                self._meta_head_before = None
+                self._request_self_restart()
+            self._meta_head_before = None
+            return
+
+        # Skip if in cooldown
+        if "meta" in self.agent_cooldowns and time.time() < self.agent_cooldowns["meta"]:
+            return
+
+        activity_tail, git_log = self._gather_meta_context()
+        prompt = config.META_PROMPT.format(
+            base_dir=config.BASE_DIR,
+            activity_tail=activity_tail or "(no activity log)",
+            git_log=git_log or "(no commits)",
+        )
+        agent = self._launch_agent("meta", prompt, cwd=config.BASE_DIR)
+        if agent is not None:
+            self._meta_head_before = self._git_last_commit(cwd=config.BASE_DIR)
+
     # ─── Main loop ───────────────────────────────────────────────────────
 
     def run(self):
@@ -835,6 +897,7 @@ class Supervisor:
                 self._phase_sre()
                 self._phase_entropy_check()
                 self._phase_supervisor_check()
+                self._phase_meta()
 
                 # Tick summary
                 active = [n for n, a in self.active_agents.items() if a is not None]

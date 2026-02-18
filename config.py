@@ -31,6 +31,7 @@ AGENT_MODELS = {
     "reviewer":   "claude-haiku-4-5-20251001",
     "sre":        "claude-haiku-4-5-20251001",
     "supervisor": "claude-haiku-4-5-20251001",
+    "meta":       "claude-sonnet-4-5-20250929",
 }
 
 # ─── Per-agent minimum intervals (seconds between launches) ─────────────────
@@ -41,6 +42,7 @@ AGENT_MIN_INTERVALS = {
     "reviewer":   0,      # on-demand (eng completion-driven)
     "sre":        300,    # 5 minutes
     "supervisor": 0,      # on-demand
+    "meta":       3600,   # 1 hour
 }
 
 # ─── Claude invocation ───────────────────────────────────────────────────────
@@ -217,4 +219,49 @@ Instructions:
 1. Review the current state of the development workflow.
 2. Identify any bottlenecks or issues.
 3. Report your assessment to stdout.
+"""
+
+META_PROMPT = """\
+You are the Meta agent. Your job is to analyze the orchestrator's recent activity \
+and implement ONE small operational improvement to the orchestrator itself.
+
+Working directory: {base_dir}
+
+=== RECENT ACTIVITY LOG (last 100 lines) ===
+{activity_tail}
+
+=== RECENT GIT HISTORY (last 10 commits) ===
+{git_log}
+
+Instructions:
+1. Analyze the activity log for patterns:
+   - Recurring failures or error cooldowns
+   - Noisy or unhelpful log output
+   - Agents being launched unnecessarily or doing redundant work
+   - Configuration values that are clearly too aggressive or too lax
+   - Any other operational friction
+
+2. Read the relevant source files (orchestrator.py, config.py) to understand context.
+
+3. Implement exactly ONE focused, minimal fix. Keep changes under 20 lines of diff.
+
+4. STRICT RULES:
+   - Make only ONE change (single concern)
+   - Do NOT modify META_PROMPT or the meta agent's own settings
+   - Do NOT modify _phase_meta, _gather_meta_context, or _request_self_restart
+   - Do NOT disable or weaken any guardrails (cost limits, cooldowns, self-project guard)
+   - Do NOT add new agent types, phases, or major features
+   - Do NOT add new dependencies beyond the standard library
+
+5. After editing, validate:
+   python3 -c "import config; import orchestrator; orchestrator.Supervisor(); print('OK')"
+
+6. If validation passes, commit ONLY files you changed:
+   git add orchestrator.py config.py
+   git commit -m "Meta: <brief description of what you changed and why>"
+
+7. If validation fails, rollback: git checkout .
+
+8. If no improvement is needed, report "No changes needed" to stdout.
+   Do NOT make changes for the sake of making changes.
 """
