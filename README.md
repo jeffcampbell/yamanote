@@ -152,6 +152,8 @@ ls -lt agents/logs/ | head
 
 ### 6. Web dashboard (optional)
 
+![Dashboard](img/yamanote_dashboard.png)
+
 A locally-hosted web dashboard gives an at-a-glance view of agent status, pipeline progress, backlog, and recent activity — accessible from any device on the LAN. Disabled by default.
 
 **Enable via CLI flag:**
@@ -175,8 +177,6 @@ The dashboard shows:
 - **Backlog** — queued specs with priority
 - **Activity feed** — color-coded event log
 - **Configuration** — collapsible current settings
-
-![Dashboard](img/yamanote_dashboard.png)
 
 A JSON API is also available at `GET /api/status` for programmatic access.
 
