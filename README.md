@@ -172,7 +172,7 @@ Then open `http://<host>:8080/` in a browser. The page auto-refreshes every 10 s
 
 The dashboard shows:
 - **Agent cards** — status (running/idle/cooldown), PID, elapsed time, model
-- **Pipeline** — current stage (Spec, Engineer, Review, Rework, Merged)
+- **Pipeline** — current stage (Spec, Create, Review, Rework, Merged)
 - **Stats** — launches per hour, sleep mode indicator
 - **Backlog** — queued specs with priority
 - **Activity feed** — color-coded event log
