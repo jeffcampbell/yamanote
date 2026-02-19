@@ -23,7 +23,7 @@ Each phase decides whether to launch its agent based on the current state of the
 | **Dispatcher** | Haiku | Analyzes the codebase and app logs to write feature specs when the backlog is empty |
 | **Conductor** | Sonnet | Implements specs on feature branches, one at a time |
 | **Inspector** | Haiku | Reviews diffs against `main`. Merges acceptable work or requests changes |
-| **Signal** | Haiku | Monitors `app.log` for errors and files bug tickets into the backlog |
+| **Signal** | Haiku | Monitors application logs for errors and files bug tickets into the backlog |
 | **Station Manager** | Haiku | Resets branches when Conductor gets stuck in edit loops |
 | **Operations** | Sonnet | Analyzes orchestrator activity and implements small operational improvements |
 
@@ -208,6 +208,7 @@ All settings are in `config.py`. Key settings can be overridden via environment 
 | `AGENT_TEAM_DEFAULT_PROJECT` | `quote-bot` | Default project directory name under `AGENT_TEAM_DEV_DIR` |
 | `AGENT_TEAM_SERVICE_RESTART_CMD` | *(empty — skip restart)* | Shell command to restart your app after a merge |
 | `AGENT_TEAM_DASHBOARD_PORT` | `0` *(disabled)* | Port for the web dashboard (`0` = off) |
+| `AGENT_TEAM_APP_LOG_GLOB` | *(auto-discover)* | Glob pattern for the project's log file (e.g. `logs/*.log`) |
 
 ### Timing
 
@@ -274,14 +275,20 @@ AGENT_MIN_INTERVALS = {
 
 ## How the Dispatcher uses app logs
 
-The Dispatcher agent receives the last 100 lines of the target project's `app.log` (if it exists). It uses this data to:
+The Dispatcher agent receives the last 100 lines of the target project's log file (if one exists). Log files are discovered automatically:
+
+1. `AGENT_TEAM_APP_LOG_GLOB` env var (if set)
+2. `logs/*.log` in the project directory
+3. `*.log` in the project root
+
+When multiple files match, the most recently modified one is used. The Dispatcher uses this data to:
 
 - Identify which features are used most frequently
 - Check whether recently shipped features are seeing adoption
 - Spot recurring errors or user friction points
 - Prioritize refinements to popular features
 
-When no `app.log` exists, the Dispatcher falls back to codebase-only analysis.
+When no log file is found, the Dispatcher falls back to codebase-only analysis.
 
 ## Safety features
 

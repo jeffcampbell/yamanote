@@ -122,6 +122,19 @@
   .completed-title { color: #9acd32; font-weight: 700; }
   .completed-meta { color: #bbb; font-size: 0.68rem; }
 
+  /* Spec tooltip */
+  .has-tooltip { position: relative; cursor: pointer; }
+  .spec-tooltip {
+    display: none; position: absolute; z-index: 100;
+    left: 0; top: 100%; margin-top: 4px;
+    width: 340px; max-height: 260px; overflow-y: auto;
+    background: #1a1a1a; color: #ccc; border: 1px solid #444; border-radius: 4px;
+    padding: 10px 12px; font-size: 0.72rem; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+  }
+  .has-tooltip:hover .spec-tooltip { display: block; }
+
   .activity-feed {
     font-family: 'Cascadia Code', 'Fira Code', 'SF Mono', monospace;
     font-size: 0.7rem; line-height: 1.7;
@@ -447,10 +460,13 @@ function renderBacklog(backlog) {
     return;
   }
   list.innerHTML = backlog.specs.map(function(s) {
-    return '<div class="backlog-item">' +
+    var desc = (s.description || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    var tooltip = desc ? '<div class="spec-tooltip">' + desc + '</div>' : '';
+    return '<div class="backlog-item' + (desc ? ' has-tooltip' : '') + '">' +
       '<div class="backlog-title">' + (s.title || '(untitled)') + '</div>' +
       '<div class="backlog-meta"><span class="priority-' + (s.priority || 'medium') + '">' +
-      (s.priority || 'medium') + '</span> \u00b7 ' + (s.created_by || '?') + '</div></div>';
+      (s.priority || 'medium') + '</span> \u00b7 ' + (s.created_by || '?') + '</div>' +
+      tooltip + '</div>';
   }).join('');
 }
 

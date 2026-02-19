@@ -135,6 +135,7 @@ def _build_status_payload(station_manager) -> dict:
                 specs_out.append({
                     "filename": os.path.basename(path),
                     "title": data.get("title", "(untitled)"),
+                    "description": data.get("description", ""),
                     "priority": data.get("priority", "medium"),
                     "created_by": data.get("created_by", "?"),
                 })

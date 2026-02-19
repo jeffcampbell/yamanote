@@ -379,9 +379,30 @@ class StationManager:
     def _git_last_commit(self, cwd: str | None = None) -> str:
         return self._git("rev-parse", "HEAD", cwd=cwd)
 
+    def _find_app_log(self, project_dir: str) -> str | None:
+        """Resolve the project's application log file.
+
+        Priority: AGENT_TEAM_APP_LOG_GLOB env var → common log file names.
+        Returns the most-recently-modified match, or None.
+        """
+        patterns = []
+        if config.APP_LOG_GLOB:
+            patterns.append(config.APP_LOG_GLOB)
+        # Fallback: common conventions
+        patterns += ["logs/*.log", "*.log"]
+        for pattern in patterns:
+            matches = sorted(
+                glob.glob(os.path.join(project_dir, pattern)),
+                key=lambda p: os.path.getmtime(p),
+                reverse=True,
+            )
+            if matches:
+                return matches[0]
+        return None
+
     def _read_app_log_tail(self, project_dir: str, lines: int = 100) -> str:
-        log_path = os.path.join(project_dir, "app.log")
-        if not os.path.exists(log_path):
+        log_path = self._find_app_log(project_dir)
+        if not log_path:
             return ""
         result = subprocess.run(
             ["tail", "-n", str(lines), log_path],
@@ -391,8 +412,8 @@ class StationManager:
 
     def _read_new_log_lines(self, project_dir: str) -> str:
         """Read only log lines written since the last Signal run (high-water mark)."""
-        log_path = os.path.join(project_dir, "app.log")
-        if not os.path.exists(log_path):
+        log_path = self._find_app_log(project_dir)
+        if not log_path:
             return ""
 
         if project_dir not in self.sre_log_offsets:
@@ -629,7 +650,8 @@ class StationManager:
 
         spec_desc = spec_data.get("description", "")
         activity(f"Conductor — starting spec '{spec_title}' in {working_dir}")
-        activity(f"  SPEC: {spec_desc}")
+        spec_summary = spec_desc.split("\n")[0][:120].strip()
+        activity(f"  SPEC: {spec_summary}")
         prompt = config.CONDUCTOR_PROMPT.format(
             spec_json=json.dumps(spec_data, indent=2),
             spec_title=spec_title,
@@ -761,7 +783,7 @@ class StationManager:
         os.remove(feedback_path)
 
     def _phase_signal(self):
-        """If app.log exists in the current project, launch Signal to analyze."""
+        """If a log file exists in the current project, launch Signal to analyze."""
         if self._is_agent_active("signal"):
             return
 
@@ -792,7 +814,7 @@ class StationManager:
             existing_bugs_text = "(none)"
 
         ts = time.strftime("%Y%m%d_%H%M%S")
-        log.debug("Signal launching — analyzing app.log in %s (%d open Signal bugs)", project_dir, len(open_bugs))
+        log.debug("Signal launching — analyzing logs in %s (%d open Signal bugs)", project_dir, len(open_bugs))
         prompt = config.SIGNAL_PROMPT.format(
             log_lines=log_lines,
             timestamp=ts,

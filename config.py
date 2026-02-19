@@ -59,6 +59,7 @@ SERVICE_RESTART_CMD = os.environ.get("AGENT_TEAM_SERVICE_RESTART_CMD", "")
 # ─── Git ─────────────────────────────────────────────────────────────────────
 
 TRUNK_BRANCH = "main"  # default branch for target projects
+APP_LOG_GLOB = os.environ.get("AGENT_TEAM_APP_LOG_GLOB", "")  # e.g. "logs/*.log" or "app.log"
 MAX_ENG_EDITS_BEFORE_RESET = 3
 MAX_REWORK_ATTEMPTS = 3
 
