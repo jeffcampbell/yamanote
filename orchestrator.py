@@ -416,6 +416,7 @@ class StationManager:
 
     def _fetch_railway_logs(self, environment: str) -> str:
         """Fetch recent logs from Railway via CLI. Streams for RAILWAY_LOG_TIMEOUT seconds."""
+        project_dir = os.path.join(config.DEVELOPMENT_DIR, config.DEFAULT_PROJECT)
         cmd = [
             "railway", "logs",
             "-e", environment,
@@ -424,11 +425,13 @@ class StationManager:
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=project_dir,
+                start_new_session=True,  # own process group so we can kill the tree
             )
             stdout, _ = proc.communicate(timeout=config.RAILWAY_LOG_TIMEOUT)
             return stdout
         except subprocess.TimeoutExpired:
-            proc.kill()
+            os.killpg(proc.pid, 9)  # SIGKILL the entire process group
             stdout, _ = proc.communicate()
             return stdout
         except (OSError, FileNotFoundError) as e:
