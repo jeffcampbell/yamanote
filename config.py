@@ -56,6 +56,13 @@ CLAUDE_CMD_TEMPLATE = [
 
 SERVICE_RESTART_CMD = os.environ.get("AGENT_TEAM_SERVICE_RESTART_CMD", "")
 
+# ─── Railway deployment (alternative to SERVICE_RESTART_CMD) ──────────────────
+RAILWAY_PROJECT = os.environ.get("AGENT_TEAM_RAILWAY_PROJECT", "")
+RAILWAY_SERVICE = os.environ.get("AGENT_TEAM_RAILWAY_SERVICE", "")
+RAILWAY_STAGING_ENV = os.environ.get("AGENT_TEAM_RAILWAY_STAGING_ENV", "staging")
+RAILWAY_PRODUCTION_ENV = os.environ.get("AGENT_TEAM_RAILWAY_PRODUCTION_ENV", "production")
+RAILWAY_LOG_TIMEOUT = 8  # seconds to capture streaming railway logs
+
 # ─── Git ─────────────────────────────────────────────────────────────────────
 
 TRUNK_BRANCH = "main"  # default branch for target projects

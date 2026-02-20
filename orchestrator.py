@@ -400,7 +400,34 @@ class StationManager:
                 return matches[0]
         return None
 
+    def _fetch_railway_logs(self, environment: str) -> str:
+        """Fetch recent logs from Railway via CLI. Streams for RAILWAY_LOG_TIMEOUT seconds."""
+        cmd = [
+            "railway", "logs",
+            "-e", environment,
+            "-s", config.RAILWAY_SERVICE,
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            stdout, _ = proc.communicate(timeout=config.RAILWAY_LOG_TIMEOUT)
+            return stdout
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, _ = proc.communicate()
+            return stdout
+        except (OSError, FileNotFoundError) as e:
+            log.warning("Railway CLI failed: %s", e)
+            return ""
+
     def _read_app_log_tail(self, project_dir: str, lines: int = 100) -> str:
+        if config.RAILWAY_PROJECT:
+            output = self._fetch_railway_logs(config.RAILWAY_PRODUCTION_ENV)
+            if output:
+                return "\n".join(output.splitlines()[-lines:])
+            return ""
+
         log_path = self._find_app_log(project_dir)
         if not log_path:
             return ""
@@ -412,6 +439,9 @@ class StationManager:
 
     def _read_new_log_lines(self, project_dir: str) -> str:
         """Read only log lines written since the last Signal run (high-water mark)."""
+        if config.RAILWAY_PROJECT:
+            return self._read_new_railway_logs(project_dir)
+
         log_path = self._find_app_log(project_dir)
         if not log_path:
             return ""
@@ -445,6 +475,39 @@ class StationManager:
         self._sre_prev_offsets[project_dir] = stored_offset
         self.sre_log_offsets[project_dir] = file_size
         return new_content
+
+    def _read_new_railway_logs(self, project_dir: str) -> str:
+        """Fetch Railway production logs and return only lines not seen before."""
+        key = "_railway_"
+        output = self._fetch_railway_logs(config.RAILWAY_PRODUCTION_ENV)
+        if not output:
+            return ""
+
+        lines = output.splitlines()
+        if not lines:
+            return ""
+
+        if key not in self.sre_log_offsets:
+            # First run: set high-water mark, return empty (same semantics as local mode)
+            self._sre_prev_offsets[key] = None
+            self.sre_log_offsets[key] = lines[-1]
+            return ""
+
+        last_seen = self.sre_log_offsets[key]
+        # Find where the last-seen line is in the new output
+        try:
+            idx = lines.index(last_seen)
+            new_lines = lines[idx + 1:]
+        except ValueError:
+            # Last-seen line not found (log rotated or too much new output) — return all
+            new_lines = lines
+
+        if not new_lines:
+            return ""
+
+        self._sre_prev_offsets[key] = last_seen
+        self.sre_log_offsets[key] = new_lines[-1]
+        return "\n".join(new_lines)
 
     def _gather_ops_context(self) -> tuple[str, str]:
         """Collect diagnostic data for the ops agent."""
@@ -872,6 +935,52 @@ class StationManager:
         self.current_conductor_spec = None
         self.current_working_dir = None
 
+    def _deploy_to_railway(self):
+        """Deploy to Railway: staging first, then production if staging is healthy."""
+        cwd = self.current_working_dir
+        service = config.RAILWAY_SERVICE
+        crash_indicators = ("Traceback", "FATAL", "ModuleNotFoundError", "SyntaxError", "ImportError", "panic:")
+
+        # 1. Deploy to staging
+        activity(f"RAILWAY deploying to {config.RAILWAY_STAGING_ENV}...")
+        try:
+            result = subprocess.run(
+                ["railway", "up", "-c", "-e", config.RAILWAY_STAGING_ENV, "-s", service],
+                capture_output=True, text=True, timeout=300, cwd=cwd,
+            )
+            if result.returncode != 0:
+                activity(f"RAILWAY staging deploy failed (rc={result.returncode}): {result.stderr[:200]}")
+                return
+        except subprocess.TimeoutExpired:
+            activity("RAILWAY staging deploy timed out (300s)")
+            return
+
+        activity(f"RAILWAY staging build complete, waiting 15s for service start...")
+        time.sleep(15)
+
+        # 2. Check staging health
+        staging_logs = self._fetch_railway_logs(config.RAILWAY_STAGING_ENV)
+        unhealthy = [ind for ind in crash_indicators if ind in staging_logs]
+        if unhealthy:
+            activity(f"RAILWAY staging UNHEALTHY — found: {', '.join(unhealthy)}. Skipping production deploy.")
+            return
+
+        # 3. Deploy to production
+        activity(f"RAILWAY staging healthy, deploying to {config.RAILWAY_PRODUCTION_ENV}...")
+        try:
+            result = subprocess.run(
+                ["railway", "up", "-c", "-e", config.RAILWAY_PRODUCTION_ENV, "-s", service],
+                capture_output=True, text=True, timeout=300, cwd=cwd,
+            )
+            if result.returncode != 0:
+                activity(f"RAILWAY production deploy failed (rc={result.returncode}): {result.stderr[:200]}")
+                return
+        except subprocess.TimeoutExpired:
+            activity("RAILWAY production deploy timed out (300s)")
+            return
+
+        activity("RAILWAY production deploy complete")
+
     def _phase_service_recovery(self):
         """If Inspector merged to trunk, restart the service."""
         if self._is_agent_active("inspector"):
@@ -908,14 +1017,16 @@ class StationManager:
             self._git("checkout", config.TRUNK_BRANCH, cwd=cwd)
             self._git("branch", "-D", self.current_conductor_branch, cwd=cwd)
 
-        if not config.SERVICE_RESTART_CMD:
-            activity("SERVICE restart skipped (no SERVICE_RESTART_CMD configured)")
-        else:
+        if config.RAILWAY_PROJECT:
+            self._deploy_to_railway()
+        elif config.SERVICE_RESTART_CMD:
             rc = os.system(config.SERVICE_RESTART_CMD)
             if rc == 0:
                 activity("SERVICE restarted successfully")
             else:
                 activity(f"SERVICE restart failed (rc={rc})")
+        else:
+            activity("SERVICE restart skipped (no deployment method configured)")
 
         if self.current_conductor_spec and os.path.exists(self.current_conductor_spec + ".in_progress"):
             os.remove(self.current_conductor_spec + ".in_progress")
