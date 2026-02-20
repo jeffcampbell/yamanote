@@ -936,50 +936,42 @@ class StationManager:
         self.current_working_dir = None
 
     def _deploy_to_railway(self):
-        """Deploy to Railway: staging first, then production if staging is healthy."""
+        """Deploy to Railway via git push: staging branch first, then main if healthy."""
         cwd = self.current_working_dir
-        service = config.RAILWAY_SERVICE
         crash_indicators = ("Traceback", "FATAL", "ModuleNotFoundError", "SyntaxError", "ImportError", "panic:")
 
-        # 1. Deploy to staging
-        activity(f"RAILWAY deploying to {config.RAILWAY_STAGING_ENV}...")
-        try:
-            result = subprocess.run(
-                ["railway", "up", "-c", "-e", config.RAILWAY_STAGING_ENV, "-s", service],
-                capture_output=True, text=True, timeout=300, cwd=cwd,
-            )
-            if result.returncode != 0:
-                activity(f"RAILWAY staging deploy failed (rc={result.returncode}): {result.stderr[:200]}")
-                return
-        except subprocess.TimeoutExpired:
-            activity("RAILWAY staging deploy timed out (300s)")
+        # 1. Push to staging branch → triggers Railway staging deploy
+        activity(f"RAILWAY pushing to staging branch...")
+        result = subprocess.run(
+            ["git", "push", "origin", f"{config.TRUNK_BRANCH}:staging"],
+            capture_output=True, text=True, timeout=60, cwd=cwd,
+        )
+        if result.returncode != 0:
+            activity(f"RAILWAY staging push failed (rc={result.returncode}): {result.stderr[:200]}")
             return
 
-        activity(f"RAILWAY staging build complete, waiting 15s for service start...")
-        time.sleep(15)
+        # 2. Wait for Railway to build and start the service
+        activity("RAILWAY staging pushed, waiting 60s for build + startup...")
+        time.sleep(60)
 
-        # 2. Check staging health
+        # 3. Check staging health
         staging_logs = self._fetch_railway_logs(config.RAILWAY_STAGING_ENV)
         unhealthy = [ind for ind in crash_indicators if ind in staging_logs]
         if unhealthy:
             activity(f"RAILWAY staging UNHEALTHY — found: {', '.join(unhealthy)}. Skipping production deploy.")
             return
 
-        # 3. Deploy to production
-        activity(f"RAILWAY staging healthy, deploying to {config.RAILWAY_PRODUCTION_ENV}...")
-        try:
-            result = subprocess.run(
-                ["railway", "up", "-c", "-e", config.RAILWAY_PRODUCTION_ENV, "-s", service],
-                capture_output=True, text=True, timeout=300, cwd=cwd,
-            )
-            if result.returncode != 0:
-                activity(f"RAILWAY production deploy failed (rc={result.returncode}): {result.stderr[:200]}")
-                return
-        except subprocess.TimeoutExpired:
-            activity("RAILWAY production deploy timed out (300s)")
+        # 4. Push to main branch → triggers Railway production deploy
+        activity(f"RAILWAY staging healthy, pushing to main branch...")
+        result = subprocess.run(
+            ["git", "push", "origin", config.TRUNK_BRANCH],
+            capture_output=True, text=True, timeout=60, cwd=cwd,
+        )
+        if result.returncode != 0:
+            activity(f"RAILWAY production push failed (rc={result.returncode}): {result.stderr[:200]}")
             return
 
-        activity("RAILWAY production deploy complete")
+        activity("RAILWAY production deploy triggered")
 
     def _phase_service_recovery(self):
         """If Inspector merged to trunk, restart the service."""
