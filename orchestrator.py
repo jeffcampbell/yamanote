@@ -920,6 +920,16 @@ class StationManager:
         if not branch:
             return
 
+        # Don't fire if the branch was already merged — let service_recovery handle it
+        feedback_path = self._feedback_path(branch)
+        if os.path.exists(feedback_path):
+            try:
+                with open(feedback_path) as f:
+                    if f.readline().strip() == "MERGED":
+                        return
+            except OSError:
+                pass
+
         max_edits = max(self.conductor_file_edits.values()) if self.conductor_file_edits else 0
         if max_edits < config.MAX_ENG_EDITS_BEFORE_RESET:
             return
