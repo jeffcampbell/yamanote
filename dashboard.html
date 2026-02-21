@@ -57,9 +57,13 @@
 
   /* ── Agent Cards ── */
   .agents-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
+    display: flex; flex-wrap: wrap; justify-content: center;
     gap: 10px; padding: 0 24px 12px;
+  }
+  .agents-grid .agent-card { min-width: 155px; }
+  .train-groups-row {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: 10px; width: 100%; padding-top: 2px;
   }
   .agent-card {
     background: #fff; padding: 10px 12px;
@@ -68,6 +72,41 @@
   }
   .agent-card.running { border-color: #9acd32; }
   .agent-card.cooldown { border-color: #ffb300; }
+
+  /* ── Train group cards ── */
+  .train-group { min-width: 155px; }
+  .train-group {
+    background: #fff; padding: 0;
+    border: 2px solid #e0e0e0;
+    border-radius: 4px;
+  }
+  .train-group.has-running { border-color: #9acd32; }
+  .train-group.type-express { border-left: 3px solid #ffb300; }
+  .train-group.type-regular { border-left: 3px solid #9acd32; }
+  .train-group-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; cursor: pointer; user-select: none;
+  }
+  .train-group-header:hover { background: #fafafa; }
+  .train-group-arrow {
+    font-size: 0.65rem; color: #999; transition: transform 0.15s;
+    flex-shrink: 0;
+  }
+  .train-group.open .train-group-arrow { transform: rotate(90deg); }
+  .train-group-summary { flex: 1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .train-group-detail {
+    display: none; border-top: 1px solid #f0f0f0;
+    padding: 0;
+  }
+  .train-group.open .train-group-detail { display: block; }
+  .train-detail-row {
+    padding: 8px 12px 8px 28px;
+    border-bottom: 1px solid #f5f5f5;
+    font-size: 0.72rem; color: #666;
+  }
+  .train-detail-row:last-child { border-bottom: none; }
+  .train-detail-id { font-weight: 600; color: #333; }
+  .train-detail-spec { color: #999; margin-left: 8px; }
   .agent-name {
     font-weight: 700; font-size: 0.78rem;
     text-transform: uppercase; letter-spacing: 0.5px; color: #333;
@@ -116,6 +155,13 @@
   .priority-high { color: #e81123; font-weight: 700; }
   .priority-medium { color: #ffb300; }
   .priority-low { color: #9acd32; }
+  .complexity-badge {
+    display: inline-block; font-size: 0.55rem; padding: 1px 4px;
+    font-weight: 700; text-transform: uppercase; border-radius: 2px;
+    margin-left: 4px;
+  }
+  .complexity-high { background: #e0e0ff; color: #5555cc; }
+  .complexity-low { background: #fff3e0; color: #cc8800; }
 
   .completed-item { padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 0.78rem; }
   .completed-item:last-child { border-bottom: none; }
@@ -179,13 +225,19 @@
 
 <div class="loop-section">
   <svg class="loop-svg" viewBox="-105 -68 1025 420">
-    <!-- Glow filter for active train -->
+    <!-- Glow filters for train types -->
     <defs>
-      <filter id="trainGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <filter id="trainGlow-regular" x="-100%" y="-100%" width="300%" height="300%">
         <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
         <feColorMatrix in="blur" type="matrix"
           values="0 0 0 0 0.6  0 0 0 0 0.8  0 0 0 0 0.2  0 0 0 0.6 0" result="green"/>
         <feMerge><feMergeNode in="green"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="trainGlow-express" x="-100%" y="-100%" width="300%" height="300%">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+        <feColorMatrix in="blur" type="matrix"
+          values="0 0 0 0 1.0  0 0 0 0 0.7  0 0 0 0 0.0  0 0 0 0.6 0" result="amber"/>
+        <feMerge><feMergeNode in="amber"/><feMergeNode in="SourceGraphic"/></feMerge>
       </filter>
     </defs>
 
@@ -252,9 +304,8 @@
             fill="#333" font-weight="700">Merged</text>
     </g>
 
-    <!-- Train indicator -->
-    <rect id="trainEl" width="22" height="9" rx="2.5"
-          fill="#fff" stroke="#333" stroke-width="1.5" visibility="hidden"/>
+    <!-- Train indicators (created dynamically) -->
+    <g id="trainGroup"></g>
 
     <!-- Center text -->
     <text id="specText" x="400" y="132" text-anchor="middle"
@@ -303,10 +354,11 @@ var STATIONS = [
 ];
 
 var STAGE_KEYS = STATIONS.map(function(s) { return s.key; });
+var TRAIN_COLORS = { regular: '#9acd32', express: '#ffb300' };
 
 var trackPath = null;
 var trackLength = 0;
-var currentTrainPos = -1;
+var trainElements = {};  // train_id -> SVG rect element
 
 function fmtDuration(secs) {
   if (secs == null) return '-';
@@ -323,45 +375,112 @@ function updateClock() {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString();
 }
 
-function positionTrain(pct) {
-  var train = document.getElementById('trainEl');
+function trainLabel(trainId, trainType) {
+  // "regular-0" -> "R-0", "express-1" -> "E-1"
+  var prefix = trainType === 'express' ? 'E' : 'R';
+  var idx = trainId.replace(/^[^-]+-/, '');
+  return prefix + '-' + idx;
+}
+
+function ensureTrainEl(trainId, trainType) {
+  if (trainElements[trainId]) return trainElements[trainId];
+  var ns = 'http://www.w3.org/2000/svg';
+  var g = document.createElementNS(ns, 'g');
+  g.setAttribute('visibility', 'hidden');
+
+  var rect = document.createElementNS(ns, 'rect');
+  rect.setAttribute('width', '30');
+  rect.setAttribute('height', '14');
+  rect.setAttribute('rx', '3');
+  rect.setAttribute('fill', TRAIN_COLORS[trainType] || '#fff');
+  rect.setAttribute('stroke', '#333');
+  rect.setAttribute('stroke-width', '1.5');
+  g.appendChild(rect);
+
+  var text = document.createElementNS(ns, 'text');
+  text.setAttribute('x', '15');
+  text.setAttribute('y', '11');
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('font-size', '9');
+  text.setAttribute('font-weight', '700');
+  text.setAttribute('fill', '#fff');
+  text.textContent = trainLabel(trainId, trainType);
+  g.appendChild(text);
+
+  document.getElementById('trainGroup').appendChild(g);
+  trainElements[trainId] = g;
+  return g;
+}
+
+function positionTrainEl(el, pct, trainType) {
   if (!trackPath) {
     trackPath = document.getElementById('trackPath');
     trackLength = trackPath.getTotalLength();
   }
   if (pct < 0) {
-    train.setAttribute('visibility', 'hidden');
-    train.removeAttribute('filter');
-    currentTrainPos = -1;
+    el.setAttribute('visibility', 'hidden');
+    el.removeAttribute('filter');
     return;
   }
-  train.setAttribute('visibility', 'visible');
-  train.setAttribute('filter', 'url(#trainGlow)');
+  el.setAttribute('visibility', 'visible');
+  el.setAttribute('filter', 'url(#trainGlow-' + trainType + ')');
 
-  // Animate smoothly by stepping
   var targetLen = trackLength * pct / 100;
   var pt = trackPath.getPointAtLength(targetLen);
   var pt2 = trackPath.getPointAtLength(Math.min(targetLen + 2, trackLength));
   var angle = Math.atan2(pt2.y - pt.y, pt2.x - pt.x) * 180 / Math.PI;
-  train.setAttribute('transform',
-    'translate(' + pt.x + ',' + pt.y + ') rotate(' + angle + ') translate(-11,-4.5)');
-  currentTrainPos = pct;
+  el.setAttribute('transform',
+    'translate(' + pt.x + ',' + pt.y + ') rotate(' + angle + ') translate(-15,-7)');
 }
 
-function renderPipeline(pipeline) {
-  var activeIdx = STAGE_KEYS.indexOf(pipeline.stage);
+function renderTrains(trains) {
+  // Find the most-advanced active stage across all trains for station highlighting
+  var maxIdx = -1;
+  var activeTrainIds = {};
 
+  if (!trains || trains.length === 0) trains = [];
+
+  trains.forEach(function(t, idx) {
+    var el = ensureTrainEl(t.train_id, t.train_type);
+    var stageIdx = STAGE_KEYS.indexOf(t.stage);
+    activeTrainIds[t.train_id] = true;
+
+    if (stageIdx > 0) {
+      // Offset multiple trains slightly so they don't overlap
+      var offset = idx * 3;
+      positionTrainEl(el, STATIONS[stageIdx].trainPos + offset, t.train_type);
+    } else {
+      positionTrainEl(el, -1, t.train_type);
+    }
+
+    if (stageIdx > maxIdx) maxIdx = stageIdx;
+  });
+
+  // Hide train elements for trains that no longer exist
+  for (var id in trainElements) {
+    if (!activeTrainIds[id]) {
+      trainElements[id].setAttribute('visibility', 'hidden');
+    }
+  }
+
+  // Station dot highlighting (based on most advanced train)
   for (var i = 0; i < STATIONS.length; i++) {
     var dot = document.getElementById('dot-' + i);
     var brect = document.getElementById('brect-' + i);
 
-    if (activeIdx >= 0 && i === activeIdx) {
+    // Check if any train is at this station
+    var trainAtStation = false;
+    trains.forEach(function(t) {
+      if (STAGE_KEYS.indexOf(t.stage) === i) trainAtStation = true;
+    });
+
+    if (trainAtStation) {
       dot.setAttribute('fill', '#ffb300');
       dot.setAttribute('stroke', '#9acd32');
       dot.classList.add('dot-active');
       brect.setAttribute('stroke', '#9acd32');
       brect.setAttribute('stroke-width', '2');
-    } else if (activeIdx >= 0 && i < activeIdx) {
+    } else if (maxIdx >= 0 && i < maxIdx) {
       dot.setAttribute('fill', '#fff');
       dot.setAttribute('stroke', '#9acd32');
       dot.classList.remove('dot-active');
@@ -376,19 +495,17 @@ function renderPipeline(pipeline) {
     }
   }
 
-  // Train position
-  if (activeIdx > 0) {
-    positionTrain(STATIONS[activeIdx].trainPos);
-  } else {
-    positionTrain(-1);
-  }
-
-  // Center text
+  // Center text — show first active train's spec, or summary
   var specText = document.getElementById('specText');
   var specDetail = document.getElementById('specDetail');
-  if (pipeline.current_spec) {
-    specText.textContent = pipeline.current_spec;
-    specDetail.textContent = 'Rework ' + pipeline.rework_count + '/' + pipeline.max_rework;
+  var activeTrains = trains.filter(function(t) { return t.stage !== 'idle'; });
+  if (activeTrains.length === 1) {
+    var t = activeTrains[0];
+    specText.textContent = t.current_spec || t.train_id;
+    specDetail.textContent = t.train_id + ' \u2014 Rework ' + t.rework_count + '/' + t.max_rework;
+  } else if (activeTrains.length > 1) {
+    specText.textContent = activeTrains.length + ' trains active';
+    specDetail.textContent = activeTrains.map(function(t) { return t.train_id; }).join(', ');
   } else {
     specText.textContent = 'Awaiting departure';
     specDetail.textContent = '';
@@ -397,8 +514,6 @@ function renderPipeline(pipeline) {
 
 var AGENT_DESC = {
   dispatcher:      'Writes specs from codebase analysis',
-  conductor:       'Implements specs on feature branches',
-  inspector:       'Reviews diffs and merges work',
   signal:          'Monitors app logs for errors',
   station_manager: 'Resets stuck engineering branches',
   ops:             'Improves orchestrator operations'
@@ -410,9 +525,14 @@ function modelFamily(model) {
   return parts.length >= 2 ? parts[1] : model;
 }
 
-function renderAgents(agents) {
+// Preserve open/closed state across refreshes
+var trainGroupOpen = {};
+
+function renderAgents(agents, trains) {
   var grid = document.getElementById('agentsGrid');
   grid.innerHTML = '';
+
+  // Global agent cards first
   for (var name in agents) {
     var info = agents[name];
     var status = info.status || 'idle';
@@ -439,6 +559,94 @@ function renderAgents(agents) {
       details;
     grid.appendChild(card);
   }
+
+  // Train group cards after global agents (on a new row)
+  if (trains && trains.length > 0) {
+    var row = document.createElement('div');
+    row.className = 'train-groups-row';
+    var groups = {};
+    trains.forEach(function(t) {
+      if (!groups[t.train_type]) groups[t.train_type] = [];
+      groups[t.train_type].push(t);
+    });
+
+    var typeOrder = ['regular', 'express'];
+    typeOrder.forEach(function(type) {
+      var group = groups[type];
+      if (!group) return;
+
+      var typeLabel = type === 'express' ? 'Express' : 'Regular';
+      var typeColor = type === 'express' ? '#ffb300' : '#9acd32';
+
+      var running = 0, cooldown = 0, active = 0;
+      group.forEach(function(t) {
+        var cs = (t.conductor && t.conductor.status) || 'idle';
+        var is = (t.inspector && t.inspector.status) || 'idle';
+        if (cs === 'running' || is === 'running') running++;
+        if (cs === 'cooldown' || is === 'cooldown') cooldown++;
+        if (t.stage !== 'idle') active++;
+      });
+
+      var summaryParts = [];
+      summaryParts.push(group.length + (group.length === 1 ? ' train' : ' trains'));
+      if (running > 0) summaryParts.push(running + ' running');
+      else if (cooldown > 0) summaryParts.push(cooldown + ' cooldown');
+      else summaryParts.push('all idle');
+      if (active > 0) summaryParts.push(active + ' with spec');
+
+      var hasRunning = running > 0;
+      var isOpen = trainGroupOpen[type] || false;
+
+      var tcard = document.createElement('div');
+      tcard.className = 'train-group type-' + type + (hasRunning ? ' has-running' : '') + (isOpen ? ' open' : '');
+
+      var headerHtml =
+        '<div class="train-group-header">' +
+          '<span class="train-group-arrow">\u25B6</span>' +
+          '<div class="train-group-summary">' +
+            '<span class="agent-name">' + typeLabel +
+              '<span class="agent-badge" style="background:' + typeColor + ';color:#fff">' + summaryParts[0].toUpperCase() + '</span>' +
+            '</span>' +
+            '<span class="agent-detail" style="margin:0">' + summaryParts.slice(1).join(' \u00b7 ') + '</span>' +
+          '</div>' +
+        '</div>';
+
+      var detailHtml = '<div class="train-group-detail">';
+      group.forEach(function(t) {
+        var cs = (t.conductor && t.conductor.status) || 'idle';
+        var is = (t.inspector && t.inspector.status) || 'idle';
+        var specLabel = t.current_spec || '';
+        var parts = [t.train_id];
+        if (specLabel) parts.push(specLabel);
+
+        var statusParts = [];
+        statusParts.push('C: <span class="agent-badge badge-' + cs + '">' + cs + '</span>' +
+          (cs === 'running' && t.conductor ? ' ' + fmtDuration(t.conductor.running_for_seconds) : ''));
+        statusParts.push('I:<span class="agent-badge badge-' + is + '">' + is + '</span>' +
+          (is === 'running' && t.inspector ? ' ' + fmtDuration(t.inspector.running_for_seconds) : ''));
+
+        detailHtml +=
+          '<div class="train-detail-row" style="display:flex;justify-content:space-between;align-items:center">' +
+            '<span class="train-detail-id">' + parts.join(' ') + '</span>' +
+            '<span style="white-space:nowrap">' + statusParts.join(' &nbsp;') + '</span>' +
+          '</div>';
+      });
+      detailHtml += '</div>';
+
+      tcard.innerHTML = headerHtml + detailHtml;
+
+      tcard.querySelector('.train-group-header').addEventListener('click', (function(tp, el) {
+        return function() {
+          trainGroupOpen[tp] = !trainGroupOpen[tp];
+          el.classList.toggle('open');
+        };
+      })(type, tcard));
+
+      row.appendChild(tcard);
+    });
+
+    grid.appendChild(row);
+  }
 }
 
 function renderStats(stats) {
@@ -462,10 +670,12 @@ function renderBacklog(backlog) {
   list.innerHTML = backlog.specs.map(function(s) {
     var desc = (s.description || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     var tooltip = desc ? '<div class="spec-tooltip">' + desc + '</div>' : '';
+    var complexity = s.complexity || 'high';
+    var complexityBadge = '<span class="complexity-badge complexity-' + complexity + '">' + complexity + '</span>';
     return '<div class="backlog-item' + (desc ? ' has-tooltip' : '') + '">' +
       '<div class="backlog-title">' + (s.title || '(untitled)') + '</div>' +
       '<div class="backlog-meta"><span class="priority-' + (s.priority || 'medium') + '">' +
-      (s.priority || 'medium') + '</span> \u00b7 ' + (s.created_by || '?') + '</div>' +
+      (s.priority || 'medium') + '</span>' + complexityBadge + ' \u00b7 ' + (s.created_by || '?') + '</div>' +
       tooltip + '</div>';
   }).join('');
 }
@@ -527,8 +737,8 @@ function refresh() {
       failCount = 0;
       document.getElementById('connBanner').classList.remove('visible');
       renderUptime(data.uptime_seconds);
-      renderAgents(data.agents || {});
-      renderPipeline(data.pipeline || {});
+      renderAgents(data.agents || {}, data.trains || []);
+      renderTrains(data.trains || []);
       renderStats(data.stats || {});
       renderBacklog(data.backlog || {});
       renderCompleted(data.completed || []);

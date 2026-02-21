@@ -114,30 +114,76 @@ class AgentProcess:
         return log_path
 
 
+class Train:
+    """Encapsulates per-pipeline state for a single train."""
+
+    def __init__(self, train_id: str, train_type: str, conductor_model: str, inspector_model: str, complexity: str):
+        self.train_id = train_id
+        self.train_type = train_type
+        self.conductor_model = conductor_model
+        self.inspector_model = inspector_model
+        self.complexity = complexity
+
+        # Pipeline state
+        self.spec_path: str | None = None
+        self.branch: str | None = None
+        self.working_dir: str | None = None
+        self.file_edits: dict[str, int] = {}
+        self.edits_tallied: bool = False
+        self.rework_count: int = 0
+        self.spec_timeout_count: int = 0
+
+        # Agent slots
+        self.conductor: AgentProcess | None = None
+        self.inspector: AgentProcess | None = None
+
+        # Per-train cooldowns
+        self.conductor_cooldown_until: float = 0.0
+        self.inspector_cooldown_until: float = 0.0
+        self.conductor_failures: int = 0
+        self.inspector_failures: int = 0
+
+    def reset_pipeline(self):
+        """Clear state after merge/cancel/entropy."""
+        self.spec_path = None
+        self.branch = None
+        self.working_dir = None
+        self.file_edits.clear()
+        self.edits_tallied = False
+        self.rework_count = 0
+        self.spec_timeout_count = 0
+
+
 class StationManager:
-    """Main orchestration loop managing 6 agent personas."""
+    """Main orchestration loop managing multi-train agent pipelines."""
 
     def __init__(self):
         # Ensure folder structure exists
         for d in (config.BACKLOG_DIR, config.REVIEW_DIR, config.LOGS_DIR):
             os.makedirs(d, exist_ok=True)
 
+        # Build trains from config
+        self.trains: list[Train] = []
+        for train_type, cfg in config.TRAIN_CONFIG.items():
+            for i in range(cfg["count"]):
+                train = Train(
+                    train_id=f"{train_type}-{i}",
+                    train_type=train_type,
+                    conductor_model=cfg["conductor_model"],
+                    inspector_model=cfg["inspector_model"],
+                    complexity=cfg["complexity"],
+                )
+                self.trains.append(train)
+
+        # Global agents (not per-train)
         self.active_agents: dict[str, AgentProcess | None] = {
             "dispatcher": None,
-            "conductor": None,
-            "inspector": None,
             "signal": None,
             "station_manager": None,
             "ops": None,
         }
-        self.conductor_file_edits: dict[str, int] = {}
         self.last_merge_commit: str | None = None
-        self.current_conductor_spec: str | None = None
-        self.current_conductor_branch: str | None = None
-        self.current_working_dir: str | None = None
-        self.rework_counts: dict[str, int] = {}
-        self.spec_timeout_counts: dict[str, int] = {}  # spec path → timeout streak
-        self._dispatcher_skip_logged_branch: str | None = None
+        self._dispatcher_skip_logged_trains: set[str] = set()
 
         # Cost guardrail: track agent launches in a rolling window
         self.launch_times: deque[float] = deque()
@@ -147,7 +193,6 @@ class StationManager:
         self.agent_cooldowns: dict[str, float] = {}  # agent name → earliest retry time
         self.consecutive_failures: dict[str, int] = {}  # agent name → failure streak
         self.last_launch_times: dict[str, float] = {}  # agent name → last launch timestamp
-        self._conductor_edits_tallied: bool = False  # True once edits counted for current Conductor run
 
         # Signal high-water mark: only analyze new log lines since last run
         self.sre_log_offsets: dict[str, int] = {}  # project_dir → byte offset in app.log
@@ -194,10 +239,27 @@ class StationManager:
             os.rename(path, original)
             activity(f"RECOVERED orphaned spec: {os.path.basename(original)}")
 
-    def _backlog_specs(self) -> list[str]:
-        """Return backlog specs sorted by priority (high first), then oldest first."""
+    def _backlog_specs(self, complexity: str | None = None) -> list[str]:
+        """Return backlog specs sorted by priority (high first), then oldest first.
+
+        If complexity is given, filter to specs matching that complexity.
+        Specs without a complexity field default to "high".
+        """
         PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
         specs = sorted(glob.glob(os.path.join(config.BACKLOG_DIR, "*.json")))
+        if complexity is not None:
+            filtered = []
+            for path in specs:
+                try:
+                    with open(path) as f:
+                        data = json.load(f)
+                    spec_complexity = data.get("complexity", "high")
+                    if spec_complexity == complexity:
+                        filtered.append(path)
+                except (json.JSONDecodeError, OSError):
+                    if complexity == "high":
+                        filtered.append(path)
+            specs = filtered
         def sort_key(path: str) -> tuple[int, str]:
             try:
                 with open(path) as f:
@@ -289,45 +351,6 @@ class StationManager:
         if name == "signal":
             self.sre_log_offsets.update(self._sre_prev_offsets)
         self._sre_prev_offsets.clear()
-
-        if name == "conductor" and self.current_conductor_spec:
-            spec_path = self.current_conductor_spec
-            self.spec_timeout_counts[spec_path] = self.spec_timeout_counts.get(spec_path, 0) + 1
-            timeouts = self.spec_timeout_counts[spec_path]
-
-            if timeouts >= config.MAX_SPEC_TIMEOUTS:
-                activity(
-                    f"TERMINATED spec after {timeouts} overdue: {os.path.basename(spec_path)}"
-                )
-                # Reset conductor failure counter so the next spec doesn't inherit this
-                # spec's timeout backoff — each spec deserves a fresh start.
-                self.consecutive_failures.pop("conductor", None)
-                self.agent_cooldowns.pop("conductor", None)
-                in_progress = spec_path + ".in_progress"
-                if os.path.exists(in_progress):
-                    os.remove(in_progress)
-                # Clean up the branch if it exists
-                cwd = self.current_working_dir
-                branch = self.current_conductor_branch
-                if cwd and branch and self._git_has_branch(branch, cwd=cwd):
-                    self._git("checkout", config.TRUNK_BRANCH, cwd=cwd)
-                    self._git("branch", "-D", branch, cwd=cwd)
-                # Delete any stale inspector feedback for this branch
-                if branch:
-                    fb = self._feedback_path(branch)
-                    if os.path.exists(fb):
-                        os.remove(fb)
-                del self.spec_timeout_counts[spec_path]
-            else:
-                in_progress = spec_path + ".in_progress"
-                if os.path.exists(in_progress):
-                    os.rename(in_progress, spec_path)
-                    activity(f"RE-ROUTED spec after Conductor overdue ({timeouts}/{config.MAX_SPEC_TIMEOUTS}): {os.path.basename(spec_path)}")
-
-            self.current_conductor_branch = None
-            self.current_conductor_spec = None
-            self.current_working_dir = None
-            self.conductor_file_edits.clear()
 
     def _launch_agent(self, name: str, prompt: str, cwd: str | None = None) -> AgentProcess | None:
         # Error cooldown check
@@ -541,6 +564,7 @@ class StationManager:
     def _request_self_restart(self):
         """Gracefully terminate all agents and exit for systemd to restart."""
         activity("OPS RESTART — new commits detected, restarting orchestrator...")
+        # Terminate global agents
         for name, agent in self.active_agents.items():
             if agent and agent.proc and agent.proc.poll() is None:
                 activity(f"Terminating {name} (PID {agent.proc.pid})")
@@ -550,6 +574,17 @@ class StationManager:
                 except subprocess.TimeoutExpired:
                     agent.proc.kill()
                 agent.save_log()
+        # Terminate per-train agents
+        for train in self.trains:
+            for role, agent in [("conductor", train.conductor), ("inspector", train.inspector)]:
+                if agent and agent.proc and agent.proc.poll() is None:
+                    activity(f"Terminating {role}:{train.train_id} (PID {agent.proc.pid})")
+                    agent.proc.terminate()
+                    try:
+                        agent.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        agent.proc.kill()
+                    agent.save_log()
         activity("All agents stopped. Exiting for restart.")
         sys.exit(0)
 
@@ -558,6 +593,184 @@ class StationManager:
         if not working_dir:
             return False
         return os.path.realpath(working_dir) == os.path.realpath(config.SELF_PROJECT_DIR)
+
+    # ─── Per-train agent helpers ─────────────────────────────────────────
+
+    def _is_train_agent_active(self, train: Train, role: str) -> bool:
+        """Check if a train's conductor or inspector is still running. Handle completion."""
+        agent = train.conductor if role == "conductor" else train.inspector
+        if agent is None:
+            return False
+        if agent.poll():
+            agent.save_log()
+            rc = agent.proc.returncode if agent.proc else "?"
+            summary = agent.get_output()[:200].replace("\n", " ").strip()
+            activity(f"ARRIVED  [{role}:{train.train_id}] rc={rc} — {summary or '(no output)'}")
+            if role == "conductor":
+                train.conductor = None
+            else:
+                train.inspector = None
+            if rc != 0:
+                agent_output = agent.get_output() + agent.get_stderr()
+                if "out of extra usage" in agent_output or "rate limit" in agent_output.lower():
+                    self.sleep_until = time.time() + config.SLEEP_MODE_DURATION
+                    activity(
+                        f"RATE LIMIT [{role}:{train.train_id}] — API quota exhausted, "
+                        f"entering SERVICE SUSPENDED for {config.SLEEP_MODE_DURATION}s"
+                    )
+                    return False
+                if role == "conductor":
+                    train.conductor_failures += 1
+                    backoff = min(config.AGENT_ERROR_COOLDOWN * (2 ** train.conductor_failures), config.MAX_ERROR_BACKOFF)
+                    train.conductor_cooldown_until = time.time() + backoff
+                    activity(f"DELAY [{role}:{train.train_id}] — failure #{train.conductor_failures}, retry after {backoff}s")
+                else:
+                    train.inspector_failures += 1
+                    backoff = min(config.AGENT_ERROR_COOLDOWN * (2 ** train.inspector_failures), config.MAX_ERROR_BACKOFF)
+                    train.inspector_cooldown_until = time.time() + backoff
+                    activity(f"DELAY [{role}:{train.train_id}] — failure #{train.inspector_failures}, retry after {backoff}s")
+            else:
+                if role == "conductor":
+                    train.conductor_failures = 0
+                else:
+                    train.inspector_failures = 0
+            return False
+        if agent.is_timed_out():
+            self._kill_timed_out_train_agent(train, role, agent)
+            return False
+        return True
+
+    def _launch_train_agent(self, train: Train, role: str, prompt: str, cwd: str | None = None) -> AgentProcess | None:
+        """Launch a conductor or inspector for a specific train. Uses shared cost guardrail."""
+        now = time.time()
+        if role == "conductor" and now < train.conductor_cooldown_until:
+            remaining = int(train.conductor_cooldown_until - now)
+            log.info("Train %s conductor in cooldown (%ds remaining), skipping", train.train_id, remaining)
+            return None
+        if role == "inspector" and now < train.inspector_cooldown_until:
+            remaining = int(train.inspector_cooldown_until - now)
+            log.info("Train %s inspector in cooldown (%ds remaining), skipping", train.train_id, remaining)
+            return None
+
+        # Shared cost guardrail
+        self.launch_times.append(now)
+        while self.launch_times and self.launch_times[0] < now - 3600:
+            self.launch_times.popleft()
+        if len(self.launch_times) > config.MAX_AGENT_LAUNCHES_PER_HOUR:
+            self.sleep_until = now + config.SLEEP_MODE_DURATION
+            activity(
+                f"FARE LIMIT — {len(self.launch_times)} launches in the last hour "
+                f"(limit {config.MAX_AGENT_LAUNCHES_PER_HOUR}). "
+                f"Entering SERVICE SUSPENDED until {time.ctime(self.sleep_until)}"
+            )
+            self.launch_times.clear()
+            return None
+
+        model = train.conductor_model if role == "conductor" else train.inspector_model
+        agent_name = f"{role}:{train.train_id}"
+        agent = AgentProcess(agent_name, prompt, cwd=cwd, model=model)
+        agent.start()
+        if role == "conductor":
+            train.conductor = agent
+        else:
+            train.inspector = agent
+        activity(f"DEPARTED [{agent_name}] PID {agent.proc.pid} model={model} cwd={cwd or 'default'}")
+        return agent
+
+    def _kill_timed_out_train_agent(self, train: Train, role: str, agent: AgentProcess):
+        """Handle timeout for a train's conductor or inspector."""
+        elapsed = time.time() - (agent.start_time or 0)
+        agent_name = f"{role}:{train.train_id}"
+        activity(f"OVERDUE [{agent_name}] after {elapsed:.0f}s — terminating")
+        if agent.proc and agent.proc.poll() is None:
+            agent.proc.terminate()
+            try:
+                agent.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                agent.proc.kill()
+                agent.proc.wait()
+        agent.save_log(marker="[OVERDUE]")
+
+        if role == "conductor":
+            train.conductor = None
+            train.conductor_failures += 1
+            backoff = min(config.AGENT_ERROR_COOLDOWN * (2 ** train.conductor_failures), config.MAX_ERROR_BACKOFF)
+            train.conductor_cooldown_until = time.time() + backoff
+            activity(f"DELAY [{agent_name}] — overdue #{train.conductor_failures}, retry after {backoff}s")
+        else:
+            train.inspector = None
+            train.inspector_failures += 1
+            backoff = min(config.AGENT_ERROR_COOLDOWN * (2 ** train.inspector_failures), config.MAX_ERROR_BACKOFF)
+            train.inspector_cooldown_until = time.time() + backoff
+            activity(f"DELAY [{agent_name}] — overdue #{train.inspector_failures}, retry after {backoff}s")
+
+        if role == "conductor" and train.spec_path:
+            train.spec_timeout_count += 1
+            if train.spec_timeout_count >= config.MAX_SPEC_TIMEOUTS:
+                activity(f"TERMINATED spec after {train.spec_timeout_count} overdue: {os.path.basename(train.spec_path)}")
+                train.conductor_failures = 0
+                train.conductor_cooldown_until = 0.0
+                in_progress = train.spec_path + ".in_progress"
+                if os.path.exists(in_progress):
+                    os.remove(in_progress)
+                cwd = train.working_dir
+                branch = train.branch
+                if cwd and branch and self._git_has_branch(branch, cwd=cwd):
+                    self._git("checkout", config.TRUNK_BRANCH, cwd=cwd)
+                    self._git("branch", "-D", branch, cwd=cwd)
+                if branch:
+                    fb = self._feedback_path(branch)
+                    if os.path.exists(fb):
+                        os.remove(fb)
+                train.reset_pipeline()
+            else:
+                in_progress = train.spec_path + ".in_progress"
+                if os.path.exists(in_progress):
+                    original = train.spec_path
+                    os.rename(in_progress, original)
+                    activity(f"RE-ROUTED spec after Conductor overdue ({train.spec_timeout_count}/{config.MAX_SPEC_TIMEOUTS}): {os.path.basename(original)}")
+                train.branch = None
+                train.spec_path = None
+                train.working_dir = None
+                train.file_edits.clear()
+
+    def _find_spec_for_train(self, train: Train) -> str | None:
+        """Find a suitable spec for this train based on complexity.
+
+        Regular trains try high first, then fall back to low.
+        Express trains only pick low complexity specs.
+        """
+        # Check for specs already claimed by another train (collision guard)
+        busy_dirs = set()
+        for other in self.trains:
+            if other.train_id != train.train_id and other.working_dir:
+                busy_dirs.add(os.path.realpath(other.working_dir))
+
+        def _first_available(specs: list[str]) -> str | None:
+            for spec_path in specs:
+                try:
+                    with open(spec_path) as f:
+                        data = json.load(f)
+                    wd = data.get("working_dir", "")
+                    if wd and os.path.realpath(wd) in busy_dirs:
+                        continue
+                    return spec_path
+                except (json.JSONDecodeError, OSError):
+                    continue
+            return None
+
+        # Primary complexity
+        primary = self._backlog_specs(complexity=train.complexity)
+        result = _first_available(primary)
+        if result:
+            return result
+
+        # Fallback: regular trains can pick low specs; express never picks high
+        if train.train_type == "regular":
+            fallback = self._backlog_specs(complexity="low")
+            return _first_available(fallback)
+
+        return None
 
     # ─── Entropy check ───────────────────────────────────────────────────
 
@@ -576,14 +789,14 @@ class StationManager:
                 count += 1
         return count
 
-    def _fire_conductor_entropy(self, branch: str, cwd: str | None = None):
+    def _fire_conductor_entropy(self, train: Train, branch: str, cwd: str | None = None):
         """Fire the Conductor agent — nuke the branch and re-queue the spec."""
         activity(
-            f"DERAILED [conductor] — branch {branch} has too many fix/update commits. "
+            f"DERAILED [conductor:{train.train_id}] — branch {branch} has too many fix/update commits. "
             f"Clearing branch and re-queuing spec."
         )
         # Kill conductor if still running
-        conductor = self.active_agents.get("conductor")
+        conductor = train.conductor
         if conductor and conductor.proc and conductor.proc.poll() is None:
             conductor.proc.terminate()
             try:
@@ -592,7 +805,7 @@ class StationManager:
                 conductor.proc.kill()
                 conductor.proc.wait()
             conductor.save_log(marker="[DERAILED — ENTROPY]")
-        self.active_agents["conductor"] = None
+        train.conductor = None
 
         # Delete any stale inspector feedback for this branch
         fb = self._feedback_path(branch)
@@ -604,16 +817,13 @@ class StationManager:
         self._git("branch", "-D", branch, cwd=cwd)
 
         # Re-queue spec
-        if self.current_conductor_spec:
-            in_progress = self.current_conductor_spec + ".in_progress"
+        if train.spec_path:
+            in_progress = train.spec_path + ".in_progress"
             if os.path.exists(in_progress):
-                os.rename(in_progress, self.current_conductor_spec)
-                activity(f"RE-ROUTED spec: {os.path.basename(self.current_conductor_spec)}")
+                os.rename(in_progress, train.spec_path)
+                activity(f"RE-ROUTED spec: {os.path.basename(train.spec_path)}")
 
-        self.conductor_file_edits.clear()
-        self.current_conductor_branch = None
-        self.current_conductor_spec = None
-        self.current_working_dir = None
+        train.reset_pipeline()
 
     # ─── Phases ──────────────────────────────────────────────────────────
 
@@ -632,11 +842,14 @@ class StationManager:
         if not os.path.isdir(default_dir):
             default_dir = config.DEVELOPMENT_DIR
 
-        # Don't generate new specs while conductor→inspector→merge pipeline is active
-        if self.current_conductor_branch:
-            if self._dispatcher_skip_logged_branch != self.current_conductor_branch:
-                activity(f"Dispatcher — skipped, conductor pipeline active on {self.current_conductor_branch}")
-                self._dispatcher_skip_logged_branch = self.current_conductor_branch
+        # Don't generate new specs while any train has an active pipeline
+        active_trains = [t for t in self.trains if t.branch]
+        if active_trains:
+            train_ids = ", ".join(t.train_id for t in active_trains)
+            key = frozenset(t.train_id for t in active_trains)
+            if key != self._dispatcher_skip_logged_trains:
+                activity(f"Dispatcher — skipped, pipeline active on {train_ids}")
+                self._dispatcher_skip_logged_trains = key
             return
 
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -651,38 +864,36 @@ class StationManager:
         if agent is not None:
             activity(f"Dispatcher — backlog empty, generating spec for {default_dir}")
 
-    def _phase_conductor(self):
-        """If backlog has specs and no Conductor running, pick oldest spec and launch Conductor."""
-        if self._is_agent_active("conductor"):
+    def _train_phase_conductor(self, train: Train):
+        """If backlog has specs and no Conductor running on this train, pick a spec and launch."""
+        if self._is_train_agent_active(train, "conductor"):
             return
-        # Don't log intent if Conductor is in cooldown — _launch_agent would silently skip
-        if "conductor" in self.agent_cooldowns and time.time() < self.agent_cooldowns["conductor"]:
+        if time.time() < train.conductor_cooldown_until:
             return
 
         # Track file edits once after Conductor finishes (not every tick)
-        if not self._conductor_edits_tallied and self.active_agents.get("conductor") is None and self.current_conductor_branch:
-            cwd = self.current_working_dir
-            if self._git_has_branch(self.current_conductor_branch, cwd=cwd):
+        if not train.edits_tallied and train.conductor is None and train.branch:
+            cwd = train.working_dir
+            if self._git_has_branch(train.branch, cwd=cwd):
                 diff_stat = self._git(
                     "diff", "--name-only",
-                    f"{config.TRUNK_BRANCH}..{self.current_conductor_branch}",
+                    f"{config.TRUNK_BRANCH}..{train.branch}",
                     cwd=cwd,
                 )
                 for fname in diff_stat.splitlines():
                     fname = fname.strip()
                     if fname:
-                        self.conductor_file_edits[fname] = self.conductor_file_edits.get(fname, 0) + 1
-            self._conductor_edits_tallied = True
+                        train.file_edits[fname] = train.file_edits.get(fname, 0) + 1
+            train.edits_tallied = True
 
         # Don't pick up a new spec while a branch is still in the review pipeline
-        if self.current_conductor_branch:
+        if train.branch:
             return
 
-        specs = self._backlog_specs()
-        if not specs:
+        spec_path = self._find_spec_for_train(train)
+        if not spec_path:
             return
 
-        spec_path = specs[0]
         try:
             with open(spec_path) as f:
                 spec_data = json.load(f)
@@ -701,7 +912,7 @@ class StationManager:
             os.remove(spec_path)
             return
 
-        # Validate working_dir exists and is under /home/pi/Development
+        # Validate working_dir exists and is under Development dir
         if not os.path.isdir(working_dir):
             activity(f"RESTRICTED spec {os.path.basename(spec_path)} — working_dir {working_dir} does not exist. Removing.")
             os.remove(spec_path)
@@ -713,20 +924,21 @@ class StationManager:
 
         spec_title = spec_data.get("title", "untitled")
         branch_name = f"feature/{spec_title}"
-        self.conductor_file_edits.clear()  # Reset edit counts for the new spec
-        self.current_conductor_spec = spec_path
-        self.current_conductor_branch = branch_name
-        self.current_working_dir = working_dir
+        train.file_edits.clear()
+        train.spec_path = spec_path
+        train.branch = branch_name
+        train.working_dir = working_dir
+        train.rework_count = 0
+        train.spec_timeout_count = 0
 
-        # If the feature branch already exists with changes (e.g. orphaned spec from
-        # a prior run that actually completed), skip Conductor and go straight to inspector.
+        # If the feature branch already exists with changes, skip Conductor → inspector
         if self._git_has_branch(branch_name, cwd=working_dir) and self._git_diff_trunk(branch_name, cwd=working_dir):
-            activity(f"Conductor — branch {branch_name} already has changes, routing to inspector (orphan recovery)")
+            activity(f"Conductor:{train.train_id} — branch {branch_name} already has changes, routing to inspector (orphan recovery)")
             os.rename(spec_path, spec_path + ".in_progress")
             return
 
         spec_desc = spec_data.get("description", "")
-        activity(f"Conductor — starting spec '{spec_title}' in {working_dir}")
+        activity(f"Conductor:{train.train_id} — starting spec '{spec_title}' in {working_dir}")
         spec_summary = spec_desc.split("\n")[0][:120].strip()
         activity(f"  SPEC: {spec_summary}")
         prompt = config.CONDUCTOR_PROMPT.format(
@@ -734,28 +946,24 @@ class StationManager:
             spec_title=spec_title,
             working_dir=working_dir,
         )
-        agent = self._launch_agent("conductor", prompt, cwd=working_dir)
+        agent = self._launch_train_agent(train, "conductor", prompt, cwd=working_dir)
         if agent is None:
-            # Launch was blocked (cooldown or cost guardrail) — don't move the spec
-            self.current_conductor_spec = None
-            self.current_conductor_branch = None
-            self.current_working_dir = None
+            train.reset_pipeline()
             return
-        self._conductor_edits_tallied = False
+        train.edits_tallied = False
         os.rename(spec_path, spec_path + ".in_progress")
 
-    def _phase_inspector(self):
-        """If Conductor finished and branch exists with changes, launch Inspector."""
-        if self._is_agent_active("inspector"):
+    def _train_phase_inspector(self, train: Train):
+        """If Conductor finished on this train and branch has changes, launch Inspector."""
+        if self._is_train_agent_active(train, "inspector"):
             return
-        if self._is_agent_active("conductor"):
+        if self._is_train_agent_active(train, "conductor"):
             return
-        # Don't log intent if Inspector is in cooldown — _launch_agent would silently skip
-        if "inspector" in self.agent_cooldowns and time.time() < self.agent_cooldowns["inspector"]:
+        if time.time() < train.inspector_cooldown_until:
             return
 
-        branch = self.current_conductor_branch
-        cwd = self.current_working_dir
+        branch = train.branch
+        cwd = train.working_dir
         if not branch or not cwd:
             return
         if not self._git_has_branch(branch, cwd=cwd):
@@ -763,23 +971,21 @@ class StationManager:
 
         diff = self._git_diff_trunk(branch, cwd=cwd)
         if not diff:
-            activity(f"Inspector — no diff on branch {branch}, cleaning up empty branch")
+            activity(f"Inspector:{train.train_id} — no diff on branch {branch}, cleaning up empty branch")
             self._git("checkout", config.TRUNK_BRANCH, cwd=cwd)
             self._git("branch", "-D", branch, cwd=cwd)
-            if self.current_conductor_spec:
-                in_progress = self.current_conductor_spec + ".in_progress"
+            if train.spec_path:
+                in_progress = train.spec_path + ".in_progress"
                 if os.path.exists(in_progress):
                     os.remove(in_progress)
-            self.current_conductor_branch = None
-            self.current_conductor_spec = None
-            self.current_working_dir = None
+            train.reset_pipeline()
             return
 
         feedback_path = os.path.join(
             config.REVIEW_DIR,
             f"{branch.replace('/', '_')}_feedback.md",
-        )  # canonical path passed to Inspector prompt
-        activity(f"Inspector — reviewing branch {branch} in {cwd}")
+        )
+        activity(f"Inspector:{train.train_id} — reviewing branch {branch} in {cwd}")
         prompt = config.INSPECTOR_PROMPT.format(
             branch_name=branch,
             diff=diff[:8000],
@@ -787,16 +993,20 @@ class StationManager:
             review_dir=config.REVIEW_DIR,
             feedback_path=feedback_path,
         )
-        self._launch_agent("inspector", prompt, cwd=cwd)
+        self._launch_train_agent(train, "inspector", prompt, cwd=cwd)
 
-    def _phase_rework(self):
-        """If inspector requested changes and both Conductor and Inspector are idle, re-launch Conductor."""
-        if self._is_agent_active("conductor") or self._is_agent_active("inspector"):
-            return
+    def _train_phase_rework(self, train: Train):
+        """If inspector requested changes on this train, re-launch Conductor."""
+        if train.conductor is not None or train.inspector is not None:
+            # Still active — check them
+            self._is_train_agent_active(train, "conductor")
+            self._is_train_agent_active(train, "inspector")
+            if train.conductor is not None or train.inspector is not None:
+                return
 
-        branch = self.current_conductor_branch
-        spec_path = self.current_conductor_spec
-        cwd = self.current_working_dir
+        branch = train.branch
+        spec_path = train.spec_path
+        cwd = train.working_dir
         if not branch or not spec_path:
             return
 
@@ -813,23 +1023,17 @@ class StationManager:
         except OSError:
             return
 
-        rework_key = spec_path
-        self.rework_counts[rework_key] = self.rework_counts.get(rework_key, 0) + 1
-        if self.rework_counts[rework_key] > config.MAX_REWORK_ATTEMPTS:
-            activity(f"CANCELLED spec after {config.MAX_REWORK_ATTEMPTS} rework attempts — branch {branch}")
+        train.rework_count += 1
+        if train.rework_count > config.MAX_REWORK_ATTEMPTS:
+            activity(f"CANCELLED [{train.train_id}] spec after {config.MAX_REWORK_ATTEMPTS} rework attempts — branch {branch}")
             self._git("checkout", config.TRUNK_BRANCH, cwd=cwd)
             self._git("branch", "-D", branch, cwd=cwd)
             in_progress = spec_path + ".in_progress"
             if os.path.exists(in_progress):
                 os.remove(in_progress)
-            # Clean up the feedback file so it doesn't accumulate
             if os.path.exists(feedback_path):
                 os.remove(feedback_path)
-            self.conductor_file_edits.clear()
-            self.current_conductor_branch = None
-            self.current_conductor_spec = None
-            self.current_working_dir = None
-            del self.rework_counts[rework_key]
+            train.reset_pipeline()
             return
 
         in_progress_path = spec_path + ".in_progress"
@@ -842,8 +1046,8 @@ class StationManager:
             return
 
         activity(
-            f"RETURN [{self.rework_counts[rework_key]}/{config.MAX_REWORK_ATTEMPTS}] "
-            f"— Conductor re-addressing feedback on {branch}"
+            f"RETURN [{train.rework_count}/{config.MAX_REWORK_ATTEMPTS}] "
+            f"— Conductor:{train.train_id} re-addressing feedback on {branch}"
         )
         prompt = config.CONDUCTOR_REWORK_PROMPT.format(
             spec_json=json.dumps(spec_data, indent=2),
@@ -852,8 +1056,8 @@ class StationManager:
             reviewer_feedback=reviewer_feedback,
             working_dir=cwd,
         )
-        self._launch_agent("conductor", prompt, cwd=cwd)
-        self._conductor_edits_tallied = False
+        self._launch_train_agent(train, "conductor", prompt, cwd=cwd)
+        train.edits_tallied = False
         os.remove(feedback_path)
 
     def _phase_signal(self):
@@ -861,8 +1065,13 @@ class StationManager:
         if self._is_agent_active("signal"):
             return
 
-        # Check the current working project, or default to configured project
-        project_dir = self.current_working_dir
+        # Check current working projects, or default to configured project
+        # Use the first train's working dir if any are active, else default
+        project_dir = None
+        for train in self.trains:
+            if train.working_dir:
+                project_dir = train.working_dir
+                break
         if not project_dir:
             project_dir = os.path.join(config.DEVELOPMENT_DIR, config.DEFAULT_PROJECT)
 
@@ -898,10 +1107,10 @@ class StationManager:
         )
         self._launch_agent("signal", prompt, cwd=project_dir)
 
-    def _phase_entropy_check(self):
+    def _train_phase_entropy_check(self, train: Train):
         """If branch has too many fix/update commits, fire Conductor and restart."""
-        branch = self.current_conductor_branch
-        cwd = self.current_working_dir
+        branch = train.branch
+        cwd = train.working_dir
         if not branch or not cwd:
             return
         if not self._git_has_branch(branch, cwd=cwd):
@@ -909,14 +1118,14 @@ class StationManager:
 
         fix_count = self._count_fix_commits_on_branch(branch, cwd=cwd)
         if fix_count >= config.ENTROPY_FIX_COMMIT_THRESHOLD:
-            self._fire_conductor_entropy(branch, cwd=cwd)
+            self._fire_conductor_entropy(train, branch, cwd=cwd)
 
-    def _phase_station_manager_check(self):
+    def _train_phase_station_manager_check(self, train: Train):
         """If Conductor edited same files >= 3 times without merge, reset branch and re-queue."""
-        if self._is_agent_active("inspector"):
+        if train.inspector is not None:
             return
-        branch = self.current_conductor_branch
-        cwd = self.current_working_dir
+        branch = train.branch
+        cwd = train.working_dir
         if not branch:
             return
 
@@ -930,17 +1139,16 @@ class StationManager:
             except OSError:
                 pass
 
-        max_edits = max(self.conductor_file_edits.values()) if self.conductor_file_edits else 0
+        max_edits = max(train.file_edits.values()) if train.file_edits else 0
         if max_edits < config.MAX_ENG_EDITS_BEFORE_RESET:
             return
 
-        activity(f"SIGNAL CHANGE — {max_edits} edits without merge on {branch}")
+        activity(f"SIGNAL CHANGE [{train.train_id}] — {max_edits} edits without merge on {branch}")
 
-        if self.current_conductor_spec and os.path.exists(self.current_conductor_spec + ".in_progress"):
-            os.rename(self.current_conductor_spec + ".in_progress", self.current_conductor_spec)
-            activity(f"RE-ROUTED spec: {os.path.basename(self.current_conductor_spec)}")
+        if train.spec_path and os.path.exists(train.spec_path + ".in_progress"):
+            os.rename(train.spec_path + ".in_progress", train.spec_path)
+            activity(f"RE-ROUTED spec: {os.path.basename(train.spec_path)}")
 
-        # Delete any stale inspector feedback for this branch
         fb = self._feedback_path(branch)
         if os.path.exists(fb):
             os.remove(fb)
@@ -948,14 +1156,10 @@ class StationManager:
         self._git("checkout", config.TRUNK_BRANCH, cwd=cwd)
         self._git("branch", "-D", branch, cwd=cwd)
 
-        self.conductor_file_edits.clear()
-        self.current_conductor_branch = None
-        self.current_conductor_spec = None
-        self.current_working_dir = None
+        train.reset_pipeline()
 
-    def _deploy_to_railway(self):
+    def _deploy_to_railway(self, cwd: str | None = None):
         """Deploy to Railway via git push: staging branch first, then main if healthy."""
-        cwd = self.current_working_dir
         crash_indicators = ("Traceback", "FATAL", "ModuleNotFoundError", "SyntaxError", "ImportError", "panic:")
 
         # 1. Push to staging branch → triggers Railway staging deploy
@@ -991,15 +1195,15 @@ class StationManager:
 
         activity("RAILWAY production deploy triggered")
 
-    def _phase_service_recovery(self):
-        """If Inspector merged to trunk, restart the service."""
-        if self._is_agent_active("inspector"):
+    def _train_phase_service_recovery(self, train: Train):
+        """If Inspector merged to trunk on this train, restart the service."""
+        if train.inspector is not None:
             return
-        if not self.current_conductor_branch:
+        if not train.branch:
             return
 
-        cwd = self.current_working_dir
-        feedback_path = self._feedback_path(self.current_conductor_branch)
+        cwd = train.working_dir
+        feedback_path = self._feedback_path(train.branch)
         if not os.path.exists(feedback_path):
             return
 
@@ -1016,16 +1220,16 @@ class StationManager:
         if current_head == self.last_merge_commit:
             return
 
-        activity(f"TERMINUS — branch {self.current_conductor_branch} merged to trunk.")
+        activity(f"TERMINUS [{train.train_id}] — branch {train.branch} merged to trunk.")
         self.last_merge_commit = current_head
 
         # Delete the feature branch now that it's merged
-        if self._git_has_branch(self.current_conductor_branch, cwd=cwd):
+        if self._git_has_branch(train.branch, cwd=cwd):
             self._git("checkout", config.TRUNK_BRANCH, cwd=cwd)
-            self._git("branch", "-D", self.current_conductor_branch, cwd=cwd)
+            self._git("branch", "-D", train.branch, cwd=cwd)
 
         if config.RAILWAY_PROJECT:
-            self._deploy_to_railway()
+            self._deploy_to_railway(cwd=cwd)
         elif config.SERVICE_RESTART_CMD:
             rc = os.system(config.SERVICE_RESTART_CMD)
             if rc == 0:
@@ -1035,18 +1239,13 @@ class StationManager:
         else:
             activity("SERVICE restart skipped (no deployment method configured)")
 
-        if self.current_conductor_spec and os.path.exists(self.current_conductor_spec + ".in_progress"):
-            os.remove(self.current_conductor_spec + ".in_progress")
+        if train.spec_path and os.path.exists(train.spec_path + ".in_progress"):
+            os.remove(train.spec_path + ".in_progress")
 
-        # Clean up the feedback file so it doesn't accumulate and can't falsely
-        # re-trigger service recovery if the same branch name is reused later.
         if os.path.exists(feedback_path):
             os.remove(feedback_path)
 
-        self.conductor_file_edits.clear()
-        self.current_conductor_branch = None
-        self.current_conductor_spec = None
-        self.current_working_dir = None
+        train.reset_pipeline()
 
     def _log_ops_summary(self, output: str):
         """Extract and log the ops agent's activity summary with visual breakers."""
@@ -1104,6 +1303,9 @@ class StationManager:
         activity(f"  Agent timeout: {config.AGENT_TIMEOUT_SECONDS}s")
         activity(f"  Fare limit: {config.MAX_AGENT_LAUNCHES_PER_HOUR} launches/hr")
         activity(f"  Entropy threshold: {config.ENTROPY_FIX_COMMIT_THRESHOLD} fix commits")
+        activity(f"  Trains: {len(self.trains)}")
+        for train in self.trains:
+            activity(f"    {train.train_id}: type={train.train_type} complexity={train.complexity} conductor={train.conductor_model} inspector={train.inspector_model}")
         for agent_name, model in config.AGENT_MODELS.items():
             interval = config.AGENT_MIN_INTERVALS.get(agent_name, 0)
             activity(f"  {agent_name}: model={model}  min_interval={interval}s")
@@ -1119,18 +1321,27 @@ class StationManager:
                     time.sleep(config.TICK_INTERVAL)
                     continue
 
-                self._phase_service_recovery()
-                self._phase_rework()
+                # Per-train phases
+                for train in self.trains:
+                    self._train_phase_service_recovery(train)
+                    self._train_phase_rework(train)
+                    self._train_phase_conductor(train)
+                    self._train_phase_inspector(train)
+                    self._train_phase_entropy_check(train)
+                    self._train_phase_station_manager_check(train)
+
+                # Global phases (unchanged)
                 self._phase_dispatcher()
-                self._phase_conductor()
-                self._phase_inspector()
                 self._phase_signal()
-                self._phase_entropy_check()
-                self._phase_station_manager_check()
                 self._phase_ops()
 
                 # Tick summary
                 active = [n for n, a in self.active_agents.items() if a is not None]
+                for train in self.trains:
+                    if train.conductor is not None:
+                        active.append(f"conductor:{train.train_id}")
+                    if train.inspector is not None:
+                        active.append(f"inspector:{train.train_id}")
                 specs = self._backlog_specs()
                 if active or specs:
                     log.info(
@@ -1151,6 +1362,16 @@ class StationManager:
                     except subprocess.TimeoutExpired:
                         agent.proc.kill()
                     agent.save_log()
+            for train in self.trains:
+                for role, agent in [("conductor", train.conductor), ("inspector", train.inspector)]:
+                    if agent and agent.proc and agent.proc.poll() is None:
+                        activity(f"Terminating {role}:{train.train_id} (PID {agent.proc.pid})")
+                        agent.proc.terminate()
+                        try:
+                            agent.proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            agent.proc.kill()
+                        agent.save_log()
             activity("All agents stopped. Goodbye.")
 
 
