@@ -26,7 +26,7 @@ Raspberry Pi (or any machine) as a systemd service.
 - [Autopilot](#autopilot-自動運転) · [Checks and the merge queue](#checks-and-the-merge-queue)
 - [Retrospective & continuous learning](#retrospective--continuous-learning)
 - [Post-deploy watch](#post-deploy-watch) · [Notifications](#notifications-hooks)
-- [Dashboard](#dashboard) · [API](#api)
+- [Dashboard](#dashboard) · [Stats & observability](#stats--observability) · [API](#api)
 - [Getting started](#getting-started) · [Configuration](#configuration) · [Guardrails](#guardrails)
 - [Upgrading from the old orchestrator](#upgrading-from-the-old-orchestrator) · [Development](#development)
 
@@ -260,6 +260,7 @@ announcements and never stall the line.
   difficulty → class routing with first-pass rate, fare and class-fit votes.
 - **Retrospectives & playbook** — recent retros and each project's playbook by station.
 - **Line announcements** — the event feed.
+- **Stats 統計** — a second view with history; see [Stats & observability](#stats--observability).
 - **Header** — line status (Supervised / Autopilot / Paused / Suspended), today's spend,
   the **Autopilot** switch, **+ New request**, **Pause line / Resume line** (resume also
   clears an API suspension) and ⚙ **Settings**.
@@ -272,6 +273,105 @@ announcements and never stall the line.
 
 Works on phones and tablets; follows the system light/dark theme. Live updates use
 Server-Sent Events; `GET /metrics` serves Prometheus metrics.
+
+## Stats & observability
+
+### Stats view
+
+The dashboard's **Stats 統計** tab (or `/#stats`) answers "how is the factory doing?"
+over the last 24 hours, 7, 30 or 90 days, for all projects or one:
+
+- **KPIs**, each against the previous period: trains arrived, failure rate, median
+  journey (with p90), spend, fare per arrival, first-pass rate, and lines/commits merged
+  to trunk.
+- **Spend** per day (per hour for 24h) against the daily budget.
+- **Trains finished** by outcome — arrived, failed, not in service.
+- **Where the time goes** — average minutes per train at each station, split into time
+  an agent or check was working and time spent waiting (queues, gates, retries).
+- **Quality** — first-pass rate and holdout satisfaction over time.
+- **Merges** per day, with lines added/removed.
+- **Efficiency** — prompt-cache hit rate, Jev decisions and their cost, LLM triage
+  calls avoided, playbook notes added, scenarios disputed.
+- **Models** — every model (and Jev) that did work: who used it, runs, tokens, cache hit
+  rate, cost, share of spend, average cost and time per run, errors.
+
+Every chart has a hover tooltip and a **Table** toggle with the same numbers. With a
+project selected, counts and spend cover that project only and the daily-budget line is
+hidden (the budget is line-wide). Lines and commits merged are recorded at merge time;
+trains merged before that are found in git by the `Yamanote item #N` line in their merge
+commit and cached on first view.
+
+<!-- screenshot: img/yamanote_stats.png — the Stats view over 7 days (open /#stats), ~1280px wide -->
+
+### OpenTelemetry export
+
+Yamanote can stream everything to any OpenTelemetry backend — the OpenTelemetry
+Collector, Grafana (Alloy, Tempo, Mimir), Jaeger, SigNoz, Honeycomb, Langfuse and others
+— over **OTLP/HTTP with JSON encoding**, configured with the standard variables:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318   # /v1/traces and /v1/metrics are appended
+OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer%20token   # optional
+OTEL_SERVICE_NAME=yamanote                           # default
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=home # optional
+OTEL_METRIC_EXPORT_INTERVAL=60000                    # ms
+```
+
+Per-signal overrides (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `…_METRICS_ENDPOINT`) and
+`OTEL_SDK_DISABLED=true` are honoured. Only the `http/json` protocol is supported
+(stdlib only) — set any OTLP/HTTP receiver's port, usually 4318.
+
+**Traces** — one per train journey, sent when the journey closes. A retried train
+starts a new journey, so it gets a new trace covering only that journey:
+
+```
+train #12 add-csv-export                     (yamanote.item.*, cost, attempts, outcome)
+├─ station JY03 Spec
+│  └─ invoke_agent spec                      (gen_ai.operation.name, provider, model, tokens)
+│     ├─ chat minimax/minimax-m3             (gen_ai.usage.input_tokens / output_tokens …)
+│     └─ execute_tool read_file              (gen_ai.tool.name)
+├─ station JY04 Build
+│  ├─ invoke_agent builder …
+│  └─ check test                             (the project's test command)
+└─ station JY09 Retro
+   └─ chat minimax/minimax-m3                (the retrospective)
+```
+
+Model calls follow the OpenTelemetry **GenAI semantic conventions**
+(`gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`,
+`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
+`gen_ai.usage.cache_read.input_tokens`, `gen_ai.agent.name`, `gen_ai.tool.name`), so LLM
+observability tools show them natively; cost is in `yamanote.cost_usd`. The GenAI
+conventions are still marked *Development* upstream, so names may shift between
+OpenTelemetry releases. Dispatcher, Signal and Ops runs are traces of their own.
+
+**Metrics** (cumulative, recomputed from the database each interval; counters only ever
+go up, as OpenTelemetry requires):
+
+| Metric | Type | Attributes |
+|---|---|---|
+| `yamanote.trains.finished` | counter — journeys ended (a retried train counts each journey) | `yamanote.item.status`, `yamanote.project` |
+| `yamanote.agent.runs` | counter — finished agent runs | `gen_ai.request.model`, `yamanote.run.role`, `yamanote.run.status` |
+| `yamanote.llm.tokens` | counter | `gen_ai.request.model`, `gen_ai.token.type` (input / output / cache_read) |
+| `yamanote.llm.cost` | counter, USD | `gen_ai.request.model` |
+| `yamanote.train.journey.duration` | histogram, seconds | — |
+| `yamanote.merges`, `yamanote.lines.changed` | counters | `yamanote.change.type` (added / removed) |
+| `yamanote.trains.active` | gauge | `yamanote.item.status` |
+| `yamanote.spend.today`, `yamanote.autopilot`, `yamanote.paused` | gauges | — |
+
+**What leaves the machine:** train titles and outcomes, project names and paths, model
+names, token counts and costs, station timings, tool names, and the first line of each
+tool call (e.g. the shell command an agent ran). Request descriptions, specs, scenarios,
+file contents and model output are not exported.
+
+Export reads the database on a cursor that only moves forward when the backend accepts
+a batch, so nothing is lost while a collector is down. It starts from "now" on first
+run rather than replaying history. The Stats view shows whether export is on and the
+last error, if any. `GET /metrics` (Prometheus text format) remains available for
+scrapers.
+
+To try it locally, run an OpenTelemetry Collector with an OTLP/HTTP receiver on
+`0.0.0.0:4318` and the `debug` exporter, and point `OTEL_EXPORTER_OTLP_ENDPOINT` at it.
 
 ## API
 
@@ -287,6 +387,7 @@ POST also needs the header `X-Yamanote: 1`, which blocks cross-site form posts.
 | `GET /api/runs/{id}/steps?after=N` | An agent run's steps (model turns, tool calls) |
 | `GET /api/events?after=N` | Line-wide event feed |
 | `GET /api/diagram?hours=12` | Station × time points for the train diagram |
+| `GET /api/stats?days=7&project=…` | Everything the Stats view shows: KPIs vs the previous period, per-hour/day series, station times, models |
 | `GET /api/stream` | Server-Sent Events: `item`, `event`, `run`, `step` |
 | `GET /metrics` | Prometheus metrics |
 | `POST /api/items` | New request: `{"title", "description", "kind", "priority", "project"}` |
@@ -426,6 +527,8 @@ yamanote/
 ├── prompts.py    # station prompts and structured-result schemas
 ├── store.py      # SQLite: items, events, runs, steps, retros, kv
 ├── gitops.py     # worktrees, commits, merges, reverts
+├── stats.py      # Stats view: KPIs, series, station times, model leaderboard
+├── telemetry.py  # OpenTelemetry export (OTLP/HTTP JSON, GenAI conventions)
 ├── dashboard.py  # JSON API, SSE stream, /metrics
 ├── metrics.py    # Prometheus registry
 ├── settings.py   # configuration

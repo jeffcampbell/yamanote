@@ -885,6 +885,9 @@ class Factory:
         self.store.kv_set(f"stall:{project}", 0)
         self.store.kv_set("last_merge_at", time.time())
         self.store.kv_set(f"merged:{item['id']}", info)
+        stat = gitops.merge_stats(project, info)
+        if stat:
+            self.store.kv_set(f"mergestat:{item['id']}", stat)
         self._move(item, "deploy", f"Merged to {settings.TRUNK_BRANCH} at {info[:10]}", gate=None)
 
     # ─── JY08 Deploy ────────────────────────────────────────────────────

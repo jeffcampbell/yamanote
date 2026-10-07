@@ -192,6 +192,20 @@ def merge(repo: str, branch: str, message: str) -> tuple[bool, str]:
         return True, head(repo)
 
 
+def merge_stats(repo: str, merge_commit: str) -> dict | None:
+    """What a merge brought into trunk: files, lines added/removed, and how many
+    commits the branch carried. None if the commit isn't in this repo."""
+    rc, short, _ = git("diff", "--shortstat", f"{merge_commit}^1", merge_commit, cwd=repo)
+    if rc != 0:
+        return None
+    nums = {k: 0 for k in ("files", "insertions", "deletions")}
+    for n, word in re.findall(r"(\d+) (file|insertion|deletion)", short):
+        nums[{"file": "files", "insertion": "insertions", "deletion": "deletions"}[word]] = int(n)
+    rc, count, _ = git("rev-list", "--count", f"{merge_commit}^1..{merge_commit}^2", cwd=repo)
+    nums["commits"] = int(count) if rc == 0 and count.isdigit() else 0
+    return nums
+
+
 def revert_merge(repo: str, merge_commit: str) -> tuple[bool, str]:
     """Revert a merge commit on trunk in the main checkout."""
     with repo_lock(repo):

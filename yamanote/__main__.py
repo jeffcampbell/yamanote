@@ -47,6 +47,9 @@ def main(argv: list[str] | None = None) -> None:
     signal.signal(signal.SIGTERM, _sigterm)
 
     factory = Factory(Store(settings.DB_PATH))
+    from .telemetry import Exporter
+    factory.telemetry = Exporter(factory.store, factory)
+    factory.telemetry.start()
     port = args.dashboard_port or (8080 if args.dashboard else settings.DASHBOARD_PORT)
     if port:
         from .dashboard import start_dashboard

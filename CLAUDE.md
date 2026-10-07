@@ -12,6 +12,8 @@ decisions. User-facing docs: `README.md`; guided install for agents: `SETUP.md`.
 | `factory.py` | Tick loop; one `_station_<name>` method per station; retrospectives and playbooks; Signal, Dispatcher, Ops |
 | `agent.py` | Tool-calling loop over OpenRouter; sandboxed file tools; `run` tool (temp-file output, process-group cleanup) |
 | `llm.py` | OpenRouter client: exact cost from `usage.cost`, fallbacks, Anthropic cache breakpoints |
+| `stats.py` | Stats view numbers, computed from the store per request |
+| `telemetry.py` | OpenTelemetry export: train traces (GenAI conventions) + metrics over OTLP/HTTP JSON |
 | `cron.py` | Five-field cron parser (`prev`/`next`) for the autopilot schedule |
 | `store.py` | SQLite: items, events, runs, steps, retros, kv. `Store.transition()` is compare-and-set — use it for status changes from jobs |
 | `prompts.py` | Station system prompts + JSON result schemas |
@@ -29,7 +31,16 @@ decisions. User-facing docs: `README.md`; guided install for agents: `SETUP.md`.
   directly — so Autopilot, the Settings panel and projects.json all stay in charge.
 - Never weaken the guardrails in README "Guardrails" without the user asking.
 - UI changes: check phone (390px), tablet (768px) and laptop (1280px) widths; headless
-  Chrome can't go below 500px, so load the page in an iframe of the target width.
+  Chrome can't go below 500px, so load the page in an iframe of the target width. Use
+  `--timeout` ≥ 25000 and a fresh `--user-data-dir`: a short timeout cancels in-flight
+  fetches and captures a half-loaded page that looks like an app bug.
+- Exported OpenTelemetry counters must never decrease: derive them from append-only
+  data (events, finished runs, kv merge stats), not from current item/run status.
+- Tests finish journeys in milliseconds; anything that compares timestamps needs a test
+  with a stretched timeline (see `test_every_run_appears_when_the_journey_takes_real_time`).
+- Charts follow the dataviz rules (validated palette, thin marks, hover + table view,
+  one axis); check new class names don't collide with existing ones (`.stats-grid` is
+  the drawer's tile grid).
 
 ## Tests
 

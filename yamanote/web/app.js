@@ -755,6 +755,16 @@ function wire() {
   $("#drawer-close").addEventListener("click", closeDrawer);
   $("#scrim").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openId) closeDrawer(); });
+  $$(".view-tab").forEach((t) => t.addEventListener("click", (e) => { e.preventDefault(); history.replaceState(null, "", t.dataset.view === "stats" ? "#stats" : location.pathname); setView(t.dataset.view); }));
+  $$("[data-days]").forEach((b) => b.addEventListener("click", () => {
+    statsDays = Number(b.dataset.days); $$("[data-days]").forEach((x) => x.classList.toggle("active", x === b)); loadStats();
+  }));
+  $("#stats-project").addEventListener("change", (e) => { statsProject = e.target.value; loadStats(); });
+  document.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-table]");
+    if (!t) return;
+    const id = t.dataset.table; tableMode.has(id) ? tableMode.delete(id) : tableMode.add(id); renderStats();
+  });
   $("#btn-autopilot").addEventListener("click", () => {
     const on = !(S?.autopilot?.on);
     if (on) {
@@ -860,9 +870,311 @@ async function boot() {
   setInterval(tickClock, 1000);
   setInterval(() => { if (S) { renderBoards(); if (openId && detail && detail.item.status === "running") renderDrawer(); } }, 5000);
   setInterval(refresh, 30000);
-  window.addEventListener("resize", () => renderDiagram());
+  window.addEventListener("resize", () => { renderDiagram(); if (view === "stats" && statsData) renderStats(); });
   const m = location.hash.match(/^#item-(\d+)$/);
   if (m) openItem(Number(m[1]));
   if (location.hash === "#settings") openSettings();
+  if (location.hash === "#stats") setView("stats");
 }
 boot();
+
+/* ══ Stats view ═════════════════════════════════════════
+   Charts are plain SVG built here (no library): thin marks, hairline grid,
+   hover tooltips, and a table view for every chart. Labels go in via
+   textContent / esc() — names come from the database. */
+
+let view = "line", statsDays = 7, statsProject = "", statsData = null, statsTimer = null;
+const tableMode = new Set();
+const NS = "http://www.w3.org/2000/svg";
+
+function setView(v) {
+  view = v;
+  $("#line-view").hidden = v !== "line";
+  $("#stats-view").hidden = v !== "stats";
+  $$(".view-tab").forEach((t) => t.classList.toggle("active", t.dataset.view === v));
+  if (v === "stats") { loadStats(); clearInterval(statsTimer); statsTimer = setInterval(loadStats, 60000); }
+  else clearInterval(statsTimer);
+}
+
+async function loadStats() {
+  $$(".chart-card").forEach((c) => c.classList.add("loading"));  // keep the frame while refetching
+  try {
+    statsData = await api(`/api/stats?days=${statsDays}${statsProject ? "&project=" + encodeURIComponent(statsProject) : ""}`);
+    renderStats();
+  } catch (e) { /* keep the previous render */ }
+  $$(".chart-card").forEach((c) => c.classList.remove("loading"));
+}
+
+const pct0 = (v) => v == null ? "—" : Math.round(v * 100) + "%";
+const minutes = (v) => v == null ? "—" : v === 0 ? "0" : v < 1 ? Math.round(v * 60) + "s" : (Number.isInteger(v) ? v : v.toFixed(1)) + "m";
+const compact = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "K" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(Math.round(n || 0));
+function bucketLabel(t, long) {
+  const d = new Date(t * 1000);
+  if (statsData.bucket === "hour") return long ? d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }) : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  return d.toLocaleDateString([], long ? { weekday: "short", month: "short", day: "numeric" } : { month: "short", day: "numeric" });
+}
+// Pick a round step first, then the axis max as a whole number of steps, so every
+// tick is a clean value. Counts never get fractional steps.
+function niceScale(v, integer) {
+  const target = 4;
+  if (!v || v <= 0) v = integer ? 4 : 1;
+  if (integer && v < 4) v = 4;  // small counts still get a 0–4 axis
+  const raw = v / target, p = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p;
+  let step = (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
+  if (integer) step = Math.max(1, Math.ceil(step));
+  const n = Math.max(1, Math.ceil(v / step - 1e-9));
+  return { max: step * n, step, n };
+}
+const niceMax = (v) => niceScale(v).max;
+
+/* ── tiles ── */
+function delta(cur, prev, upIsGood, fmt) {
+  if (cur == null || prev == null) return `<div class="kpi-delta flat">no prior data</div>`;
+  const d = cur - prev;
+  if (Math.abs(d) < 1e-9) return `<div class="kpi-delta flat">— same as previous period</div>`;
+  const cls = upIsGood == null ? "flat" : (d > 0) === upIsGood ? "good" : "bad";
+  return `<div class="kpi-delta ${cls}">${d > 0 ? "▲" : "▼"} ${esc(fmt(Math.abs(d)))} vs previous ${statsDays === 1 ? "24h" : statsDays + " days"}</div>`;
+}
+function tile(label, value, note) {
+  return `<div class="kpi"><div class="kpi-label">${esc(label)}</div><div class="kpi-value">${esc(value)}</div>${note || ""}</div>`;
+}
+
+/* ── chart scaffolding ── */
+function chartCard(id, title, sub, legend, draw, table) {
+  const card = $("#" + id);
+  const asTable = tableMode.has(id);
+  card.setAttribute("aria-label", title);
+  card.innerHTML = `<div class="chart-head"><div><h3>${esc(title)}</h3><div class="chart-sub">${esc(sub)}</div></div>
+    <button class="btn btn-sm" data-table="${id}">${asTable ? "Chart" : "Table"}</button></div>
+    ${legend && legend.length > 1 && !asTable ? `<div class="legend">${legend.map((l) => `<span><span class="key${l.line ? " line" : ""}" style="background:${l.color}"></span>${esc(l.label)}</span>`).join("")}</div>` : ""}
+    <div class="chart"></div><div class="viz-tip" hidden></div>`;
+  const el = card.querySelector(".chart");
+  if (asTable) el.innerHTML = `<div class="table-wrap">${table()}</div>`;
+  else draw(el, card.querySelector(".viz-tip"), card);
+}
+function svgEl(tag, attrs, parent) {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+function svgText(parent, x, y, text, anchor, cls) {
+  const t = svgEl("text", { x, y, "text-anchor": anchor || "start", class: cls || "" }, parent);
+  t.textContent = text;
+  return t;
+}
+function showTip(tip, card, x, y, header, rows) {
+  tip.replaceChildren();
+  const h = document.createElement("div"); h.className = "tip-h"; h.textContent = header; tip.appendChild(h);
+  for (const r of rows) {
+    const row = document.createElement("div"); row.className = "tip-row";
+    const k = document.createElement("span"); k.className = "tip-key" + (r.box ? " box" : ""); k.style.background = r.color;
+    const v = document.createElement("b"); v.textContent = r.value;
+    const l = document.createElement("span"); l.textContent = r.label;
+    row.append(k, v, l); tip.appendChild(row);
+  }
+  tip.hidden = false;
+  const cw = card.clientWidth;
+  tip.style.left = Math.max(8, Math.min(cw - tip.offsetWidth - 8, x + 12)) + "px";
+  tip.style.top = Math.max(8, y - tip.offsetHeight - 8) + "px";
+}
+const roundTop = (x, y, w, h, r) => { r = Math.max(0, Math.min(r, h, w / 2)); return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`; };
+const roundRight = (x, y, w, h, r) => { r = Math.max(0, Math.min(r, w, h / 2)); return `M${x},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h - r}Q${x + w},${y + h} ${x + w - r},${y + h}H${x}Z`; };
+
+function axes(svg, W, padL, padR, padT, plotH, yMax, fmt, n = 4) {
+  for (let i = 0; i <= n; i++) {
+    const v = yMax * i / n, y = padT + plotH - plotH * i / n;
+    svgEl("line", { x1: padL, x2: W - padR, y1: y, y2: y, class: i === 0 ? "base" : "grid" }, svg);
+    svgText(svg, padL - 6, y + 4, fmt(v), "end");
+  }
+}
+function xLabels(svg, buckets, x0, band, y) {
+  const every = Math.max(1, Math.ceil(56 / band));
+  buckets.forEach((b, i) => { if (i % every === 0) svgText(svg, x0 + i * band + band / 2, y, bucketLabel(b.t), "middle"); });
+}
+
+/* Stacked (or single) columns over time. series: [{key,label,color}] */
+function columns(el, tip, card, { series, fmt, ref, tipExtra, integer }) {
+  const data = statsData.series, W = Math.max(280, el.clientWidth), H = 220;
+  const padL = 46, padR = 10, padT = 12, padB = 24, plotH = H - padT - padB;
+  const totals = data.map((b) => series.reduce((s, x) => s + (b[x.key] || 0), 0));
+  const scale = niceScale(Math.max(...totals, ref ? ref.value : 0), integer), yMax = scale.max;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img" });
+  axes(svg, W, padL, padR, padT, plotH, yMax, fmt, scale.n);
+  const band = (W - padL - padR) / data.length, bw = Math.min(24, band * 0.62);
+  const groups = [];
+  data.forEach((b, i) => {
+    const g = svgEl("g", {}, svg), x = padL + i * band + (band - bw) / 2;
+    let y = padT + plotH;
+    const parts = series.filter((s) => (b[s.key] || 0) > 0);
+    parts.forEach((s, j) => {
+      const h = (b[s.key] / yMax) * plotH, gap = j > 0 ? 2 : 0, top = j === parts.length - 1;
+      const hh = Math.max(0, h - gap);
+      svgEl("path", { d: top ? roundTop(x, y - h, bw, hh, 4) : `M${x},${y - h}h${bw}v${hh}h${-bw}Z`, fill: s.color, class: "mark" }, g);
+      y -= h;
+    });
+    const hit = svgEl("rect", { x: padL + i * band, y: padT, width: band, height: plotH, class: "hit", tabindex: 0 }, g);
+    const show = (ev) => {
+      svg.classList.add("dim"); groups.forEach((gg) => gg.classList.remove("hot")); g.classList.add("hot");
+      const r = card.getBoundingClientRect(), hr = hit.getBoundingClientRect();
+      showTip(tip, card, (ev && ev.clientX ? ev.clientX : hr.left + hr.width / 2) - r.left, hr.top - r.top + 40, bucketLabel(b.t, true),
+        [...series.map((s) => ({ color: s.color, box: true, value: fmt(b[s.key] || 0), label: s.label })), ...(tipExtra ? tipExtra(b) : [])]);
+    };
+    hit.addEventListener("pointermove", show); hit.addEventListener("focus", show);
+    groups.push(g);
+  });
+  if (ref && ref.value > 0 && ref.value <= yMax) {
+    const y = padT + plotH - (ref.value / yMax) * plotH;
+    svgEl("line", { x1: padL, x2: W - padR, y1: y, y2: y, class: "ref" }, svg);
+    svgText(svg, W - padR, y - 4, ref.label, "end");
+  }
+  xLabels(svg, data, padL, band, H - 6);
+  svg.addEventListener("pointerleave", () => { svg.classList.remove("dim"); groups.forEach((g) => g.classList.remove("hot")); tip.hidden = true; });
+  el.replaceChildren(svg);
+}
+
+/* Lines over time on one 0–100% axis, with a crosshair. */
+function lines(el, tip, card, { series, fmt }) {
+  const data = statsData.series, W = Math.max(280, el.clientWidth), H = 220;
+  const padL = 46, padR = 54, padT = 12, padB = 24, plotH = H - padT - padB, yMax = 1;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img" });
+  axes(svg, W, padL, padR, padT, plotH, yMax, fmt);
+  const band = (W - padL - padR) / data.length, X = (i) => padL + i * band + band / 2, Y = (v) => padT + plotH - v / yMax * plotH;
+  for (const s of series) {
+    let d = "", pen = false, last = null;
+    data.forEach((b, i) => { const v = b[s.key]; if (v == null) { pen = false; return; } d += (pen ? "L" : "M") + X(i) + "," + Y(v); pen = true; last = [i, v]; });
+    if (d) svgEl("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    data.forEach((b, i) => { if (b[s.key] != null && (i === 0 || data[i - 1][s.key] == null) && (i === data.length - 1 || data[i + 1][s.key] == null))
+      svgEl("circle", { cx: X(i), cy: Y(b[s.key]), r: 3, fill: s.color }, svg); });  // isolated points stay visible
+    if (last) {
+      svgEl("circle", { cx: X(last[0]), cy: Y(last[1]), r: 4, fill: s.color, stroke: "var(--viz-surface)", "stroke-width": 2 }, svg);
+      s._end = { x: X(last[0]), y: Y(last[1]), v: last[1] };
+    }
+  }
+  const ends = series.filter((s) => s._end).sort((a, b) => a._end.y - b._end.y);
+  if (ends.length === 2 && Math.abs(ends[0]._end.y - ends[1]._end.y) < 14) ends.forEach((s) => (s._end.skip = true));  // converging: legend + tooltip carry it
+  for (const s of ends) if (!s._end.skip) svgText(svg, s._end.x + 8, s._end.y + 4, fmt(s._end.v), "start", "val");
+  const cross = svgEl("line", { y1: padT, y2: padT + plotH, class: "cross", visibility: "hidden" }, svg);
+  const hit = svgEl("rect", { x: padL, y: padT, width: W - padL - padR, height: plotH, class: "hit" }, svg);
+  hit.addEventListener("pointermove", (ev) => {
+    const r = svg.getBoundingClientRect(), sx = (ev.clientX - r.left) * (W / r.width);
+    const i = Math.max(0, Math.min(data.length - 1, Math.round((sx - padL - band / 2) / band)));
+    cross.setAttribute("x1", X(i)); cross.setAttribute("x2", X(i)); cross.setAttribute("visibility", "visible");
+    const cr = card.getBoundingClientRect();
+    showTip(tip, card, ev.clientX - cr.left, r.top - cr.top + 40, bucketLabel(data[i].t, true),
+      series.map((s) => ({ color: s.color, value: fmt(data[i][s.key]), label: s.label })));
+  });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); tip.hidden = true; });
+  xLabels(svg, data, padL, band, H - 6);
+  el.replaceChildren(svg);
+}
+
+/* Horizontal stacked bars, one per station. */
+function hbars(el, tip, card, { rows, series, fmt }) {
+  const W = Math.max(280, el.clientWidth), rowH = 26, padL = 92, padR = 54, padT = 4, H = padT + rows.length * rowH + 22;
+  const scale = niceScale(Math.max(...rows.map((r) => series.reduce((s, x) => s + r[x.key], 0)), 0.01)), max = scale.max;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img" });
+  const plotW = W - padL - padR;
+  for (let i = 0; i <= scale.n; i++) {
+    const x = padL + plotW * i / scale.n;
+    svgEl("line", { x1: x, x2: x, y1: padT, y2: H - 20, class: i === 0 ? "base" : "grid" }, svg);
+    if (W > 420 || i % 2 === 0 || i === scale.n) svgText(svg, x, H - 6, fmt(max * i / scale.n), "middle");
+  }
+  const groups = [];
+  rows.forEach((r, i) => {
+    const g = svgEl("g", {}, svg), y = padT + i * rowH + (rowH - 14) / 2;
+    svgText(svg, padL - 8, y + 11, r.label, "end");
+    let x = padL;
+    const parts = series.filter((s) => r[s.key] > 0);
+    parts.forEach((s, j) => {
+      const w = r[s.key] / max * plotW, gap = j > 0 ? 2 : 0, last = j === parts.length - 1;
+      svgEl("path", { d: last ? roundRight(x + gap, y, Math.max(0, w - gap), 14, 4) : `M${x + gap},${y}h${Math.max(0, w - gap)}v14h${-Math.max(0, w - gap)}Z`, fill: s.color, class: "mark" }, g);
+      x += w;
+    });
+    const total = series.reduce((s, x2) => s + r[x2.key], 0);
+    if (total > 0) svgText(g, x + 6, y + 11, fmt(total), "start", "val");
+    const hit = svgEl("rect", { x: 0, y: padT + i * rowH, width: W, height: rowH, class: "hit", tabindex: 0 }, g);
+    const show = (ev) => {
+      svg.classList.add("dim"); groups.forEach((gg) => gg.classList.remove("hot")); g.classList.add("hot");
+      const cr = card.getBoundingClientRect(), hr = hit.getBoundingClientRect();
+      showTip(tip, card, (ev && ev.clientX ? ev.clientX : hr.left + 120) - cr.left, hr.top - cr.top, r.long,
+        series.map((s) => ({ color: s.color, box: true, value: fmt(r[s.key]), label: s.label })));
+    };
+    hit.addEventListener("pointermove", show); hit.addEventListener("focus", show);
+    groups.push(g);
+  });
+  svg.addEventListener("pointerleave", () => { svg.classList.remove("dim"); groups.forEach((g) => g.classList.remove("hot")); tip.hidden = true; });
+  el.replaceChildren(svg);
+}
+
+function seriesTable(cols) {
+  return `<table class="viz-table"><tr><th>${statsData.bucket === "hour" ? "Hour" : "Day"}</th>${cols.map((c) => `<th class="n">${esc(c.label)}</th>`).join("")}</tr>` +
+    statsData.series.map((b) => `<tr><td>${esc(bucketLabel(b.t, true))}</td>${cols.map((c) => `<td class="n">${esc(c.fmt(b[c.key]))}</td>`).join("")}</tr>`).join("") + `</table>`;
+}
+
+function renderStats() {
+  const d = statsData, k = d.kpis, p = d.previous;
+  const sel = $("#stats-project"), cur = sel.value;
+  sel.innerHTML = `<option value="">All projects</option>` + (S?.projects || []).map((pr) => `<option value="${esc(pr.path)}">${esc(pr.name)}</option>`).join("");
+  sel.value = cur;
+  const ot = S?.telemetry;
+  $("#stats-otel").textContent = ot?.enabled
+    ? `OpenTelemetry export on → ${ot.traces_url || ot.metrics_url} · ${ot.traces_sent} traces sent this session${ot.last_error ? " · last error: " + ot.last_error : ""}`
+    : ot?.problem ? `OpenTelemetry export disabled: ${ot.problem}` : "OpenTelemetry export off (set OTEL_EXPORTER_OTLP_ENDPOINT)";
+
+  const money2 = (v) => "$" + (v || 0).toFixed(2);
+  $("#stats-kpis").innerHTML = [
+    tile("Trains arrived", String(k.arrived), delta(k.arrived, p.arrived, true, (v) => String(v))),
+    tile("Failure rate", pct0(k.failure_rate), delta(k.failure_rate, p.failure_rate, false, (v) => Math.round(v * 100) + " pts")),
+    tile("Median journey", k.journey_median == null ? "—" : dur(k.journey_median), k.journey_p90 ? `<div class="kpi-note">p90 ${esc(dur(k.journey_p90))}</div>` : ""),
+    tile("Spend", money2(k.spend), delta(k.spend, p.spend, null, money2)),
+    tile("Fare per arrival", k.cost_per_arrival == null ? "—" : money2(k.cost_per_arrival), delta(k.cost_per_arrival, p.cost_per_arrival, false, money2)),
+    tile("First-pass rate", pct0(k.first_pass), delta(k.first_pass, p.first_pass, true, (v) => Math.round(v * 100) + " pts")),
+    tile("Merged to trunk", `+${compact(k.lines_added)} / −${compact(k.lines_removed)}`, `<div class="kpi-note">${k.merges} merges · ${k.commits} commits</div>`),
+  ].join("");
+
+  chartCard("chart-spend", "Spend", statsData.bucket === "hour" ? "OpenRouter + Jev, per hour"
+    : d.project ? "OpenRouter + Jev, per day (the daily budget is line-wide)" : "OpenRouter + Jev, per day vs the daily budget", null,
+    (el, tip, card) => columns(el, tip, card, { series: [{ key: "spend", label: "spend", color: "var(--viz-1)" }], fmt: (v) => "$" + (v >= 10 ? v.toFixed(0) : v.toFixed(2)),
+      ref: d.bucket === "day" && !d.project ? { value: d.daily_budget, label: `daily budget $${d.daily_budget}` } : null }),
+    () => seriesTable([{ key: "spend", label: "Spend", fmt: (v) => "$" + v.toFixed(2) }]));
+
+  const trainSeries = [{ key: "done", label: "arrived", color: "var(--viz-good)" }, { key: "failed", label: "failed", color: "var(--viz-critical)" }, { key: "rejected", label: "not in service", color: "var(--viz-neutral)" }];
+  chartCard("chart-trains", "Trains finished", "Journeys that ended, by outcome", trainSeries.map((s) => ({ ...s })),
+    (el, tip, card) => columns(el, tip, card, { series: trainSeries, fmt: (v) => String(Math.round(v)), integer: true }),
+    () => seriesTable(trainSeries.map((s) => ({ key: s.key, label: s.label, fmt: (v) => String(v) }))));
+
+  const stSeries = [{ key: "working_min", label: "working", color: "var(--viz-1)" }, { key: "waiting_min", label: "waiting (queues, gates, retries)", color: "var(--viz-neutral)" }];
+  const stRows = d.stations.filter((r) => r.working_min + r.waiting_min > 0.001).map((r) => ({ ...r, label: `${r.code} ${r.name}`, long: `${r.code} ${r.name} — per arrived train` }));
+  chartCard("chart-stations", "Where the time goes", "Average minutes per arrived train at each station", stSeries,
+    (el, tip, card) => stRows.length ? hbars(el, tip, card, { rows: stRows, series: stSeries, fmt: minutes }) : (el.innerHTML = `<p class="empty">No arrivals in this range.</p>`),
+    () => `<table class="viz-table"><tr><th>Station</th><th class="n">Working</th><th class="n">Waiting</th></tr>${stRows.map((r) => `<tr><td>${esc(r.label)}</td><td class="n">${minutes(r.working_min)}</td><td class="n">${minutes(r.waiting_min)}</td></tr>`).join("")}</table>`);
+
+  const qSeries = [{ key: "first_pass_rate", label: "first-pass rate", color: "var(--viz-1)", line: true }, { key: "satisfaction", label: "holdout satisfaction", color: "var(--viz-2)", line: true }];
+  chartCard("chart-quality", "Quality", "Share arriving without rework, and holdout scenarios passed", qSeries,
+    (el, tip, card) => lines(el, tip, card, { series: qSeries, fmt: (v) => v == null ? "—" : Math.round(v * 100) + "%" }),
+    () => seriesTable(qSeries.map((s) => ({ key: s.key, label: s.label, fmt: (v) => v == null ? "—" : Math.round(v * 100) + "%" }))));
+
+  chartCard("chart-merges", "Merges", "Trains merged to trunk; lines changed in the tooltip", null,
+    (el, tip, card) => columns(el, tip, card, { series: [{ key: "merges", label: "merges", color: "var(--viz-1)" }], fmt: (v) => String(Math.round(v)), integer: true,
+      tipExtra: (b) => [{ color: "transparent", value: `+${b.lines_added} / −${b.lines_removed}`, label: "lines" }] }),
+    () => seriesTable([{ key: "merges", label: "Merges", fmt: (v) => String(v) }, { key: "lines_added", label: "Lines added", fmt: (v) => String(v) }, { key: "lines_removed", label: "Lines removed", fmt: (v) => String(v) }]));
+
+  const e = d.efficiency;
+  $("#chart-efficiency").innerHTML = `<div class="chart-head"><div><h3>Efficiency</h3><div class="chart-sub">Cheap decisions and learning in this range</div></div></div>
+    <div class="eff-list">
+      ${tile("Prompt cache hit rate", pct0(k.cache_rate), `<div class="kpi-note">of input tokens on ${k.llm_runs} model runs</div>`)}
+      ${tile("Jev decisions", String(k.jev_decisions), `<div class="kpi-note">$${k.jev_cost.toFixed(3)} total</div>`)}
+      ${tile("LLM triage avoided", String(e.jev_fast_pass + e.jev_rejects + e.jev_holds), `<div class="kpi-note">${e.jev_fast_pass} fast-pass · ${e.jev_rejects} rejected · ${e.jev_holds} held by Jev</div>`)}
+      ${tile("Playbook notes added", String(e.playbook_notes), `<div class="kpi-note">by retrospectives</div>`)}
+      ${tile("Scenarios disputed", String(e.disputes), `<div class="kpi-note">self-contradictory holdouts</div>`)}
+    </div>`;
+
+  const ms = d.models;
+  $("#stats-models").innerHTML = `<h3>Models</h3><div class="chart-sub" style="margin:-6px 0 10px">Every model and tool that did work in this range, by spend</div>
+    <div class="table-wrap"><table class="viz-table"><tr><th>Model</th><th>Used by</th><th class="n">Runs</th><th class="n">Tokens in</th><th class="n">Tokens out</th><th class="n">Cached</th><th class="n">Cost</th><th>Share of spend</th><th class="n">Avg / run</th><th class="n">Avg time</th><th class="n">Errors</th></tr>
+    ${ms.map((m) => `<tr><td>${modelId(m.model)}</td><td>${esc(m.roles.join(", "))}</td><td class="n">${m.runs}</td><td class="n">${compact(m.tokens_in)}</td><td class="n">${compact(m.tokens_out)}</td>
+      <td class="n">${pct0(m.cache_rate)}</td><td class="n">$${m.cost.toFixed(2)}</td><td><div class="meter" title="${Math.round(m.share * 100)}%"><div style="width:${(m.share * 100).toFixed(1)}%"></div></div></td>
+      <td class="n">$${m.avg_cost.toFixed(3)}</td><td class="n">${dur(m.avg_seconds)}</td><td class="n">${m.errors}</td></tr>`).join("") || `<tr><td colspan="11" class="muted">No model runs in this range.</td></tr>`}
+    </table></div>`;
+}
