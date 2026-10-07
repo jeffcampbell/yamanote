@@ -9,6 +9,7 @@ import mimetypes
 import os
 import queue
 import re
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -331,11 +332,22 @@ def make_handler(factory, broadcaster: Broadcaster):
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # Clients that connect and drop before sending a request (port probes,
+        # closed tabs) aren't errors worth a traceback each.
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def start_dashboard(factory, port: int, host: str | None = None) -> ThreadingHTTPServer | None:
     host = host or settings.DASHBOARD_HOST
     broadcaster = Broadcaster(factory.store)
     try:
-        server = ThreadingHTTPServer((host, port), make_handler(factory, broadcaster))
+        server = _Server((host, port), make_handler(factory, broadcaster))
     except OSError as e:
         log.error("Dashboard failed to start on %s:%d: %s", host, port, e)
         return None

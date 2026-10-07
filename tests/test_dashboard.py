@@ -80,6 +80,17 @@ class DashboardTest(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=5) as r:
             self.assertEqual(r.status, 200)
 
+    def test_dropped_connections_are_not_logged_as_errors(self):
+        import contextlib, io, socket, struct
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(3):  # connect, then reset before sending a request (a port probe)
+                c = socket.create_connection(self.server.server_address[:2], timeout=5)
+                c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                c.close()
+            self.assertTrue(self.get("/healthz")["ok"])
+        self.assertNotIn("Traceback", err.getvalue())
+
     def test_diagram_retro_and_playbook_endpoints(self):
         code, r = self.post("/api/items", {"title": "Add hello", "description": "Create hello.py"})
         item_id = r["item"]["id"]

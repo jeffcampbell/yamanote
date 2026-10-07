@@ -566,16 +566,19 @@ class Factory:
             self._reject(item, reason)
 
     def _triage_passed(self, project: str):
-        self.store.kv_set(f"rejects:{project}", 0)
+        with self._lock:
+            self.store.kv_set(f"rejects:{project}", 0)
 
     def _reject(self, item: dict, reason: str):
         project = item["project"]
         self._finish(item, "rejected", f"REJECT — {reason}")
-        n = (self.store.kv_get(f"rejects:{project}", 0) or 0) + 1
-        self.store.kv_set(f"rejects:{project}", n)
-        if n >= settings.MAX_CONSECUTIVE_REJECTIONS:
-            self.store.kv_set(f"stall:{project}", time.time() + settings.STALL_PAUSE_SECONDS)
-            self.store.kv_set(f"rejects:{project}", 0)
+        with self._lock:  # triage jobs run in parallel; don't lose a count
+            n = (self.store.kv_get(f"rejects:{project}", 0) or 0) + 1
+            stalled = n >= settings.MAX_CONSECUTIVE_REJECTIONS
+            if stalled:
+                self.store.kv_set(f"stall:{project}", time.time() + settings.STALL_PAUSE_SECONDS)
+            self.store.kv_set(f"rejects:{project}", 0 if stalled else n)
+        if stalled:
             msg = (f"{os.path.basename(project)}: {n} rejections in a row — dispatcher paused for "
                    f"{settings.STALL_PAUSE_SECONDS // 3600}h")
             self.store.event(None, "intake", "stalled", msg)
