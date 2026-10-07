@@ -286,8 +286,10 @@ class TriageTest(FactoryTestCase):
         f = self.make(triage=lambda m, t: finish("no", {"verdict": "REJECT", "reason": "nope"}))
         a = self.board(f.create_item("a", "x", source="dispatcher"))
         b = self.board(f.create_item("b", "y", source="dispatcher"))
+        # the stall is written just after the second train is marked rejected
         self.assertTrue(run_until(f, lambda: self.item(a["id"])["status"] == "rejected"
-                                  and self.item(b["id"])["status"] == "rejected"))
+                                  and self.item(b["id"])["status"] == "rejected"
+                                  and self.store.kv_get(f"stall:{a['project']}", 0)))
         self.assertIsNone(f.pick_project())
 
 
