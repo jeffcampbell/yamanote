@@ -40,7 +40,11 @@ Ask the user:
    `AGENT_TEAM_DEFAULT_PROJECT`; setup/test commands, gates and schedules then go there
    per project.
 2. **Restart a service after merging?** If so, which command (e.g. `sudo systemctl restart my-app.service`)?
-3. **Human gates?** Approve specs before building, and/or approve merges? (Recommend the merge gate to start.)
+3. **Human gates and autopilot?** In Supervised mode, should specs and/or merges need approval?
+   (Recommend the merge gate to start.) Should the line switch to **Autopilot** ("dark":
+   no gates, proposals board themselves, regressions auto-revert) on a schedule — e.g.
+   nights `0 22 * * *` to `0 7 * * 1-5`? Set `AGENT_TEAM_AUTOPILOT_ON_CRON` /
+   `AGENT_TEAM_AUTOPILOT_OFF_CRON`, or leave it for the dashboard's ⚙ Settings.
 4. **Daily budget in USD?** (default 20)
 5. **Dashboard port?** (default 8080). Ask whether it must be reachable from other devices.
    If yes, it needs `AGENT_TEAM_DASHBOARD_HOST=0.0.0.0` plus a token.
@@ -118,6 +122,9 @@ Tell the user:
 - that with the merge gate on, trains stop at JY07 with a red signal until they click
   Approve, and that the merge queue re-runs the tests on branch + latest trunk before
   anything lands;
+- that in Supervised mode, work the factory proposes itself waits at Intake for **Board**,
+  and that the **Autopilot** switch (or a schedule in ⚙ Settings) runs the line unattended,
+  with a "while you were away" report when it ends;
 - that every train ends at JY09 Retro, whose notes build up a per-station playbook for
   the project; bad notes can be removed with × on the "Retrospectives & playbook" card;
 - that spend is visible in the header bar and capped at the daily budget;

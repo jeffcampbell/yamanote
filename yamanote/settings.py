@@ -201,7 +201,7 @@ AUTO_REVERT = _env_bool("AGENT_TEAM_AUTO_REVERT", False)  # revert the merge whe
 NOTIFY_CMD = _env("AGENT_TEAM_NOTIFY_CMD", "")
 NOTIFY_WEBHOOK = _env("AGENT_TEAM_NOTIFY_WEBHOOK", "")
 NOTIFY_EVENTS = {e.strip() for e in _env(
-    "AGENT_TEAM_NOTIFY_EVENTS", "gate,failed,suspended,regression,reverted,stalled").split(",") if e.strip()}
+    "AGENT_TEAM_NOTIFY_EVENTS", "gate,failed,suspended,regression,reverted,stalled,autopilot").split(",") if e.strip()}
 NOTIFY_TIMEOUT_SECONDS = 30
 PUBLIC_URL = _env("AGENT_TEAM_PUBLIC_URL", "").rstrip("/")  # dashboard URL used for links in notifications
 
@@ -223,6 +223,16 @@ MERGE_QUEUE_RETRY_SECONDS = 15     # a train finding the project's merge queue b
 MAX_HOLDS = 2                       # a third HOLD becomes a REJECT
 CREDIT_SUSPEND_SECONDS = 3600       # pause the line this long on 401/402/403 from OpenRouter
 RATE_LIMIT_SUSPEND_SECONDS = 600    # ... and this long when 429s outlast the client's retries
+
+# ─── Autopilot ───────────────────────────────────────────────────────────────
+# Supervised: the gates below apply, and work the Dispatcher or Signal propose
+# waits at Intake for a human "Board". Autopilot ("dark"): gates are skipped,
+# proposals board themselves, regressions auto-revert. These env values seed
+# the dashboard's Settings panel; once saved there, the stored values win.
+AUTOPILOT = _env_bool("AGENT_TEAM_AUTOPILOT", False)            # initial mode on first start
+AUTOPILOT_ON_CRON = _env("AGENT_TEAM_AUTOPILOT_ON_CRON", "")     # e.g. "0 22 * * *"
+AUTOPILOT_OFF_CRON = _env("AGENT_TEAM_AUTOPILOT_OFF_CRON", "")   # e.g. "0 7 * * 1-5"
+AUTOPILOT_MERGE_WITHOUT_TESTS = _env_bool("AGENT_TEAM_AUTOPILOT_MERGE_WITHOUT_TESTS", False)
 
 DASHBOARD_PORT = _env_int("AGENT_TEAM_DASHBOARD_PORT", 0)
 DASHBOARD_HOST = _env("AGENT_TEAM_DASHBOARD_HOST", "127.0.0.1")  # 0.0.0.0 to expose on the LAN

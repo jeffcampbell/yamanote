@@ -120,6 +120,23 @@ class DashboardTest(unittest.TestCase):
         self.assertNotIn("scenarios", arrivals[0], "list views only expose a scenario count")
         self.assertEqual(arrivals[0]["scenario_count"], 1)
 
+    def test_autopilot_endpoints(self):
+        state = self.get("/api/state")["autopilot"]
+        self.assertFalse(state["on"])
+        self.assertIn("supervised_gates", state["config"])
+        code, r = self.post("/api/autopilot", {"on": True})
+        self.assertEqual((code, r["autopilot"]["on"], r["autopilot"]["source"]), (200, True, "manual"))
+        code, r = self.post("/api/autopilot/settings", {"schedule_enabled": True, "on_cron": "0 22 * * *",
+                                                        "off_cron": "0 7 * * 1-5", "merge_without_tests": True})
+        self.assertEqual(code, 200)
+        self.assertTrue(r["preview"]["next_on"] and r["preview"]["next_off"])
+        code, r = self.post("/api/autopilot/settings", {"on_cron": "61 * * * *"})
+        self.assertEqual(code, 400)
+        self.assertIn("out of range", r["error"])
+        code, r = self.post("/api/autopilot", {"on": False})
+        self.assertFalse(r["autopilot"]["on"])
+        self.assertTrue(self.get("/api/state")["autopilot_report"]["message"].startswith("Autopilot ran"))
+
     def test_bad_requests(self):
         code, r = self.post("/api/items", {"title": "x", "description": "y", "project": "/etc"})
         self.assertEqual(code, 400)

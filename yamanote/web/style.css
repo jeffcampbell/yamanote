@@ -76,6 +76,31 @@ button { font: inherit; cursor: pointer; }
 .btn-primary:hover { background: #aedb4f; }
 .btn-danger { border-color: var(--bad); color: var(--bad); }
 .btn-sm { padding: 3px 9px; font-size: 12px; }
+/* autopilot */
+.autopilot-switch { display: inline-flex; align-items: center; gap: 8px; }
+.autopilot-switch .sw { width: 30px; height: 17px; border-radius: 9px; background: #3a423b; position: relative; transition: background .2s; flex: none; }
+.autopilot-switch .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #cfd6cc; transition: transform .2s; }
+.autopilot-switch[aria-checked="true"] { border-color: var(--c-shinkansen); color: #cfe0ff; }
+.autopilot-switch[aria-checked="true"] .sw { background: var(--c-shinkansen); }
+.autopilot-switch[aria-checked="true"] .sw::after { transform: translateX(13px); background: #fff; }
+/* Header buttons share one height so the icon button can be an exact square. */
+.topbar-actions .btn { height: 34px; display: inline-flex; align-items: center; }
+.lbl-short { display: none; }
+.btn-icon { width: 34px; padding: 0; flex: none; justify-content: center; font-size: 16px; line-height: 1; }
+.pill-auto { background: rgba(47,111,222,.22); color: #9cc0ff; }
+body.autopilot .topbar { border-bottom-color: var(--c-shinkansen); }
+.banner-away { background: rgba(47,111,222,.12); color: var(--text); border-bottom: 1px solid rgba(47,111,222,.35); display: flex; gap: 10px; align-items: flex-start; }
+.banner-away .away-body { flex: 1; overflow-wrap: anywhere; }
+.banner-away a { color: inherit; font-weight: 700; cursor: pointer; text-decoration: underline dotted; }
+.banner-away button { border: 0; background: transparent; color: var(--muted); font-size: 20px; line-height: 1; min-width: 32px; }
+.set-section { border-top: 1px solid var(--border); padding-top: 12px; display: grid; gap: 8px; }
+.set-section h4 { font-size: 14px; }
+dialog label.check { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 14px; color: var(--text); font-weight: 500; }
+dialog label.check input { width: auto; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); }
+.presets .chip { cursor: pointer; color: var(--text); font: inherit; font-size: 12px; }
+.set-mode { font-size: 13px; }
+.set-preview { color: var(--line-deep); }
 .conn-lost { background: var(--bad); color: #fff; text-align: center; padding: 6px; font-size: 13px; }
 .banner { padding: 8px 20px; font-size: 13px; }
 .banner-warn { background: rgba(245,165,36,.15); color: var(--warn); border-bottom: 1px solid rgba(245,165,36,.3); }
@@ -334,7 +359,7 @@ code.cmd { font-family: var(--mono); font-size: 11px; background: var(--surface-
 .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
 
 /* ── dialog ──────────────────────────────────────────── */
-dialog { border: 0; border-radius: 14px; padding: 0; width: min(560px, calc(100vw - 32px)); background: var(--surface); color: var(--text); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+dialog { margin: auto; border: 0; border-radius: 14px; padding: 0; width: min(560px, calc(100vw - 32px)); background: var(--surface); color: var(--text); box-shadow: 0 20px 60px rgba(0,0,0,.35); }
 dialog::backdrop { background: rgba(0,0,0,.45); }
 dialog form { padding: 20px; display: grid; gap: 12px; }
 dialog h3 { font-size: 18px; }
@@ -392,6 +417,11 @@ dialog .btn { border-color: var(--border); }
   .line-list { display: block; }
 }
 @media (max-width: 720px) {
+  .topbar-actions { gap: 6px; justify-content: flex-end; }
+  .topbar-actions .btn:not(.btn-icon) { padding: 0 9px; }
+  .lbl-long { display: none; }
+  .lbl-short { display: inline; }
+  .autopilot-switch span:last-child { font-size: 12px; }
   main { padding: 12px 12px 32px; gap: 12px; }
   .card { padding: 14px; }
   /* On phones the header scrolls away instead of permanently covering ~110px. */
@@ -420,6 +450,8 @@ dialog .btn { border-color: var(--border); }
 /* Touch screens: fingers need ~40px targets. */
 @media (pointer: coarse) {
   .tab, .d-tab, .btn { min-height: 38px; }
+  .topbar-actions .btn { height: 38px; }
+  .btn-icon { width: 38px; }
   .btn-sm { min-height: 34px; }
   .lesson button { min-width: 36px; min-height: 36px; }
   .ll-train { min-height: 34px; }
