@@ -128,8 +128,9 @@ variables only seed them on first start. Open Settings directly with `/#settings
 
 A short pause still outranks either mode: **Pause line** stops departures in both.
 
-<!-- screenshot: img/yamanote_settings.png — the ⚙ Settings dialog with an overnight autopilot
-     schedule filled in (open /#settings), ~1280px wide -->
+<p align="center">
+  <img src="img/yamanote_settings.png" width="600" alt="The Settings dialog: autopilot on at 22:00 and off at 07:00 on weekdays, schedule presets, the next-switch preview, and the merge-without-tests rule">
+</p>
 
 ## Checks and the merge queue
 
