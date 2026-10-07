@@ -27,6 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from . import cron, decisions, gitops, notify, prompts, settings
 from .agent import READ_TOOLS, RUN_TOOLS, WRITE_TOOLS, Agent, AgentResult, single_shot
 from .checks import CheckResult, run_check
+from .fleet import Fleet
 from .llm import UNREACHABLE, Client
 from .metrics import METRICS
 from .store import ACTIVE_STATUSES, STATION_KEYS, TERMINAL_STATUSES, Store
@@ -87,6 +88,7 @@ class Factory:
         self._last_gc = 0.0
         self._stopping = False
         self.trains = [f"E235-{i + 1:02d}" for i in range(settings.MAX_TRAINS)]
+        self.fleet = Fleet(store)
         self._recover()
 
     # ─── lifecycle ──────────────────────────────────────────────────────
@@ -187,17 +189,42 @@ class Factory:
 
     def model_for(self, station: str, item: dict | None) -> tuple[str, str | None]:
         choice = settings.STATION_MODELS.get(station, "rapid")
-        cls = (item or {}).get("service_class") or "rapid"
-        if choice == "builder":
-            c = cls
-        elif choice == "builder+1":
-            idx = settings.CLASS_ORDER.index(cls) if cls in settings.CLASS_ORDER else 1
-            c = settings.CLASS_ORDER[min(idx + 1, len(settings.CLASS_ORDER) - 1)]
-        elif choice in settings.SERVICE_CLASSES:
-            c = choice
-        else:
+        c = settings.station_class(choice, (item or {}).get("service_class"))
+        if c is None:
             return choice, None
-        return settings.SERVICE_CLASSES[c]["model"], c
+        return Fleet.trial_model(item, station, c) or settings.SERVICE_CLASSES[c]["model"], c
+
+    def _maybe_trial(self, item: dict) -> dict:
+        model = self.fleet.assign_trial(item)
+        if not model:
+            return item
+        item = self.store.update_item(item["id"], trial_model=model)
+        self.store.event(item["id"], item["station"], "trial",
+                         f"Trial: {model} instead of {settings.SERVICE_CLASSES[item['service_class']]['model']} "
+                         f"for spec and first build ({settings.SERVICE_CLASSES[item['service_class']]['label']})")
+        return item
+
+    def _maybe_fleet(self):
+        """Daily catalogue refresh and hourly trial evaluation, off the tick thread."""
+        if not settings.FLEET_ENABLED or "fleet" in self.jobs:
+            return
+        now = time.time()
+        refresh = now - (self.store.kv_get("fleet:refreshed", 0) or 0) >= settings.CATALOG_REFRESH_SECONDS
+        evaluate = now - (self.store.kv_get("fleet:evaluated", 0) or 0) >= settings.FLEET_EVALUATE_SECONDS
+        if refresh or evaluate:
+            self._submit("fleet", self._fleet_job, refresh, evaluate)
+
+    def _fleet_job(self, refresh: bool, evaluate: bool):
+        changes = []
+        if refresh:
+            self.store.kv_set("fleet:refreshed", time.time())
+            changes += self.fleet.refresh()
+        if evaluate:
+            self.store.kv_set("fleet:evaluated", time.time())
+            changes += self.fleet.evaluate()
+        for c in changes:
+            self.store.event(None, None, "routing", c["message"], c)
+            self._notify("routing", f"Yamanote: model {c['kind']}", c["message"], data=c)
 
     def class_for_difficulty(self, level: str) -> tuple[str, str]:
         """Service class for a difficulty level, and why. With adaptive routing
@@ -237,6 +264,7 @@ class Factory:
         self._autopilot_tick()
         self._harvest()
         self._watch_logs()
+        self._maybe_fleet()  # free and read-only until it has trial results; runs while paused too
         if self.paused:
             return
         self._maintenance()
@@ -527,6 +555,7 @@ class Factory:
                                           service_class=cls, first_class=cls)
             self.store.event(item["id"], "triage", "classified",
                              f"Jev: {level} → {settings.SERVICE_CLASSES[cls]['label']} service ({why})", scores)
+            item = self._maybe_trial(item)
 
         if item["source"] == "human":
             self._move(item, "spec", "Human-requested work skips the triage gate")
@@ -634,6 +663,8 @@ class Factory:
             cls, _why = self.class_for_difficulty(level)
             fields.update(difficulty=level, service_class=cls, first_class=cls)
         item = self.store.update_item(item["id"], **fields)
+        if "first_class" in fields:
+            item = self._maybe_trial(item)
         self.store.event(item["id"], "spec", "specified",
                          f"{len(spec['acceptance_criteria'])} acceptance criteria, "
                          f"{len(scenarios)} holdout scenarios sealed")
@@ -1756,9 +1787,10 @@ def _ops_settings() -> str:
         "AGENT_TEAM_GATE_SPEC": settings.GATE_SPEC, "AGENT_TEAM_GATE_MERGE": settings.GATE_MERGE,
         "AGENT_TEAM_SATISFACTION": settings.SATISFACTION_THRESHOLD, "AGENT_TEAM_TEST_CMD": settings.TEST_CMD or "(unset)",
         "AGENT_TEAM_SETUP_CMD": settings.SETUP_CMD or "(unset)", "AGENT_TEAM_ADAPTIVE_ROUTING": settings.ADAPTIVE_ROUTING,
+        "AGENT_TEAM_MODEL_FLEET": settings.FLEET_ENABLED, "AGENT_TEAM_MODEL_TRIAL_RATE": settings.TRIAL_RATE,
         "AGENT_TEAM_DISPATCHER_INTERVAL": settings.DISPATCHER_INTERVAL, "AGENT_TEAM_AUTO_REVERT": settings.AUTO_REVERT,
         "AGENT_TEAM_DEPLOY_WATCH_SECONDS": settings.DEPLOY_WATCH_SECONDS,
-        "models.json": "per-class / per-station model overrides",
+        "models.json": "pinned class models, price bands, per-station models",
         "projects.json": "per-project setup/test commands, gates, schedule, decide_backend",
     }
     return "AVAILABLE SETTINGS (current values):\n" + "\n".join(f"- {k} = {v}" for k, v in knobs.items())

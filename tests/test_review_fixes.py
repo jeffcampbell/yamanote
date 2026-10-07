@@ -455,6 +455,51 @@ class LearningTest(FactoryTestCase):
         self.assertEqual(f.class_for_difficulty("small")[0], "local")
 
 
+class StationRoutingTest(FactoryTestCase):
+    def test_spec_verify_and_retro_follow_the_trains_class(self):
+        f = self.make()
+        models = {c: settings.SERVICE_CLASSES[c]["model"] for c in settings.CLASS_ORDER}
+        trivial, hard, unknown = {"service_class": "local"}, {"service_class": "express"}, {"service_class": None}
+        self.assertEqual(f.model_for("spec", trivial), (models["local"], "local"))
+        self.assertEqual(f.model_for("spec", hard), (models["express"], "express"))
+        self.assertEqual(f.model_for("verify", trivial)[1], "rapid", "verify never drops below Rapid")
+        self.assertEqual(f.model_for("verify", {"service_class": "shinkansen"})[1], "express", "nor above Express")
+        self.assertEqual(f.model_for("retro", hard)[1], "express")
+        self.assertEqual(f.model_for("spec", unknown)[1], "rapid", "no class yet counts as Rapid")
+        self.assertEqual(f.model_for("inspect", trivial)[1], "rapid")
+        self.assertEqual(f.model_for("triage", hard)[1], "local", "fixed classes ignore the train")
+
+    def test_choice_syntax(self):
+        sc = settings.station_class
+        self.assertEqual(sc("builder+1[..express]", "express"), "express")
+        self.assertEqual(sc("builder-1", "local"), "local")
+        self.assertEqual(sc("builder-2[rapid..]", "shinkansen"), "rapid")
+        self.assertIsNone(sc("openai/gpt-6", "local"), "literal model ids pass through")
+        self.assertIsNone(sc("builder[rapd..express]", "local"), "a misspelt class is not silently clamped")
+
+    def test_models_json_warns_about_a_bad_choice(self):
+        import json as _json
+        path = self.env.dev / "models.json"
+        path.write_text(_json.dumps({"stations": {"spec": "builder[rapd..express]"}}))
+        patch(self, settings, "MODELS_CONFIG_PATH", path)
+        patch(self, settings, "STATION_MODELS", dict(settings.STATION_MODELS))
+        with self.assertLogs("yamanote.settings", "WARNING") as logs:
+            settings._load_model_overrides()
+        self.assertIn("spec", logs.output[0])
+
+    def test_adaptive_routing_is_on_by_default(self):
+        import subprocess, sys as _sys
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if "AGENT_TEAM_ADAPTIVE_ROUTING" in open(os.path.join(repo, ".env")).read() if os.path.exists(
+                os.path.join(repo, ".env")) else False:
+            self.skipTest("this checkout's .env sets AGENT_TEAM_ADAPTIVE_ROUTING")
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_TEAM_ADAPTIVE_ROUTING"}
+        env["HOME"] = str(self.env.dev)  # no ~/development/.env either
+        out = subprocess.run([_sys.executable, "-c", "from yamanote import settings; print(settings.ADAPTIVE_ROUTING)"],
+                             capture_output=True, text=True, env=env, cwd=repo)
+        self.assertEqual(out.stdout.strip(), "True", out.stderr)
+
+
 class ErrorSlugTest(unittest.TestCase):
     def test_titles_lead_with_the_error(self):
         from yamanote.factory import _error_slug

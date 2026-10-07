@@ -19,7 +19,8 @@ for _name, _value in {"DASHBOARD_TOKEN": "", "NOTIFY_CMD": "", "NOTIFY_WEBHOOK":
                       "SERVICE_RESTART_CMD": "", "APP_LOG_GLOB": "", "RAILWAY_PROJECT": "",
                       "SETUP_CMD": "", "TEST_CMD": "", "DECIDE_SRC": "", "AUTOPILOT": False,
                       "AUTOPILOT_ON_CRON": "", "AUTOPILOT_OFF_CRON": "",
-                      "AUTOPILOT_MERGE_WITHOUT_TESTS": False}.items():
+                      "AUTOPILOT_MERGE_WITHOUT_TESTS": False, "FLEET_ENABLED": False, "TRIAL_RATE": 0.0,
+                      "PINNED_CLASSES": set()}.items():
     setattr(settings, _name, _value)
 
 

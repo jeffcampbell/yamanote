@@ -131,7 +131,7 @@ ITEM_FIELDS = {
     "title", "kind", "source", "project", "priority", "description", "spec", "scenarios",
     "difficulty", "difficulty_score", "service_class", "station", "status", "gate", "branch",
     "worktree", "train", "attempt", "conflicts", "feedback", "satisfaction", "outcome",
-    "parent_id", "holds", "first_class", "pending_status",
+    "parent_id", "holds", "first_class", "pending_status", "trial_model",
     "hold_until", "started_at", "finished_at",
 }
 JSON_FIELDS = ("spec", "scenarios")
@@ -170,7 +170,7 @@ class Store:
     # Columns added after the first release; existing databases get them on open.
     MIGRATIONS = {
         "items": [("parent_id", "INTEGER"), ("holds", "INTEGER NOT NULL DEFAULT 0"), ("first_class", "TEXT"),
-                  ("pending_status", "TEXT")],
+                  ("pending_status", "TEXT"), ("trial_model", "TEXT")],
         "runs": [("cached_tokens", "INTEGER NOT NULL DEFAULT 0")],
     }
 

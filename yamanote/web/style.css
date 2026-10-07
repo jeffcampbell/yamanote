@@ -269,6 +269,11 @@ code.cmd { font-family: var(--mono); font-size: 11px; background: var(--surface-
 .routing th { font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: .5px; }
 .routing code { font-family: var(--mono); font-size: 12px; }
 .routing code.model-id { word-break: normal; overflow-wrap: anywhere; }
+.routing .fleet .challengers { margin-top: 4px; font-size: 12px; }
+.routing .fleet .challengers div { overflow-wrap: anywhere; }
+.routing .fleet-log { margin-top: 8px; display: grid; gap: 4px; }
+.warn-text { color: var(--amber); }
+.routing .fleet-log .small { overflow-wrap: anywhere; }
 .routing .stations-map { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); white-space: nowrap; }
 #feed { list-style: none; max-height: 360px; overflow-y: auto; font-size: 13px; }

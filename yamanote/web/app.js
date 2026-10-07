@@ -354,12 +354,15 @@ function renderCrew() {
 function renderRouting() {
   const classes = Object.entries(S.service_classes);
   const by = Object.fromEntries((S.stats.by_model_24h || []).map((r) => [r.model, r]));
-  let html = `<table><tr><th>Class</th><th>Model</th><th class="num">24h</th></tr>` + classes.map(([k, c]) => {
+  const R = S.routing, F = R.fleet;
+  const fc = Object.fromEntries((F?.enabled ? F.classes : []).map((c) => [c.class, c]));
+  // Trials only run on low-risk work, so only the classes that work is routed to see challengers.
+  const trialClasses = new Set(F?.enabled && F.trial_rate > 0 ? R.levels.filter((l) => F.levels.includes(l.difficulty)).map((l) => l.class) : []);
+  let html = fleetStatus(F) + `<table class="fleet"><tr><th>Class</th><th>Model</th><th class="num">24h</th></tr>` + classes.map(([k, c]) => {
     const u = by[c.model];
     const cache = u && u.tin ? ` · ${Math.round(100 * (u.cached || 0) / u.tin)}% cached` : "";
-    return `<tr><td>${svcBadge(k)}</td><td>${modelId(c.model)}</td><td class="num">${u ? money(u.cost) + `<div class="small muted">${u.runs} runs${cache}</div>` : "—"}</td></tr>`;
+    return `<tr><td>${svcBadge(k)}</td><td>${modelId(c.model)}${fleetCell(fc[k], trialClasses.has(k))}</td><td class="num">${u ? money(u.cost) + `<div class="small muted">${u.runs} runs${cache}</div>` : "—"}</td></tr>`;
   }).join("") + `</table>`;
-  const R = S.routing;
   html += `<h3 style="margin-top:14px">Difficulty → class <span class="badge ${R.adaptive ? "badge-on" : ""}">${R.adaptive ? "ADAPTIVE" : "FIXED"}</span></h3>
     <table class="levels"><tr><th>Jev says</th><th>Runs as</th><th class="num">First-pass</th><th class="num">Avg fare</th></tr>` +
     R.levels.map((l) => {
@@ -369,11 +372,48 @@ function renderRouting() {
       return `<tr><td>${esc(l.difficulty)}</td><td>${svcBadge(l.class)}${l.class !== l.default ? `<div class="why">${esc(l.why)}</div>` : ""}</td>
         <td class="num">${rate}</td><td class="num">${h ? money(h.avg_cost) : "—"}</td></tr>`;
     }).join("") + `</table>`;
-  const labels = { builder: "item's class", "builder+1": "one class up" };
   html += `<div class="stations-map">` + Object.entries(S.station_models).filter(([st]) => !st.endsWith("_retry")).map(([st, choice]) =>
-    `<span class="chip"><b>${esc(st)}</b> → ${esc(labels[choice] || S.service_classes[choice]?.label || choice)}</span>`).join("") + `</div>`;
-  html += `<p class="small muted" style="margin-top:10px">First-pass = arrived without rework. ${R.adaptive ? `With ${R.min_samples}+ samples, a class that passes first time under 50% is bumped up; one above 90% tries a class cheaper.` : "Set AGENT_TEAM_ADAPTIVE_ROUTING=1 to let this history move routing."} Rework escalates a train one class. Fallback: <code>openrouter/auto</code>.</p>`;
+    `<span class="chip"><b>${esc(st)}</b> → ${esc(choiceLabel(choice))}</span>`).join("") + `</div>`;
+  html += fleetLog(F);
+  html += `<p class="small muted" style="margin-top:10px">First-pass = arrived without rework. ${R.adaptive ? `With ${R.min_samples}+ samples, a class that passes first time under 50% is bumped up; one above 90% tries a class cheaper.` : "Adaptive routing is off (AGENT_TEAM_ADAPTIVE_ROUTING=0), so this history doesn't move routing."} Rework escalates a train one class. Fallback: <code>openrouter/auto</code>.</p>`;
   $("#routing").innerHTML = html;
+}
+
+/* The model fleet: sync status above the class table, each class's price and
+   challengers inside it, and recent changes plus how it works below. */
+const perM = (v) => v == null ? "" : `$${v < 1 ? v.toFixed(2) : v.toFixed(1)}/M`;
+function fleetStatus(F) {
+  if (!F) return "";
+  if (!F.enabled) return `<p class="small muted" style="margin:-4px 0 8px">Model fleet off (AGENT_TEAM_MODEL_FLEET=0): classes stay on their configured models.</p>`;
+  const synced = F.fetched_at ? `OpenRouter catalogue read ${ago(F.fetched_at)} ago · ${F.eligible} of ${F.total} models usable` : "OpenRouter catalogue not read yet";
+  return `<p class="small muted" style="margin:-4px 0 8px">${esc(synced)}${F.error ? ` · <span class="warn-text">last read failed: ${esc(F.error)}</span>` : ""}</p>`;
+}
+function fleetCell(c, trials) {
+  if (!c) return "";
+  const pct = (v) => v == null ? "—" : Math.round(100 * v) + "%";
+  const own = [perM(c.price), c.pinned ? "pinned" : "", c.stats?.n ? `${pct(c.stats.rate)} first time on ${c.stats.n} ${c.stats.n === 1 ? "train" : "trains"}` : ""].filter(Boolean).join(" · ");
+  const list = trials ? c.challengers : c.challengers.filter((x) => !x.model.startsWith("typesafe/")).slice(0, 1);
+  const names = list.map((x) => `${modelId(x.model)} <span class="muted">${x.n ? `${pct(x.rate)} of ${x.n}` : perM(x.price) || "trial"}</span>`).join(", ");
+  const label = trials ? "trying" : "next in line";
+  return (own ? `<div class="small muted">${own}</div>` : "") + (names ? `<div class="challengers"><span class="muted">${label}</span> ${names}</div>` : "");
+}
+function fleetLog(F) {
+  if (!F?.enabled) return "";
+  let html = F.history.length ? `<div class="fleet-log">` + F.history.slice(0, 4).map((h) =>
+    `<div class="small"><span class="muted">${esc(ago(h.ts))} ago</span> ${esc(h.message)}</div>`).join("") + `</div>` : "";
+  return html + `<p class="small muted" style="margin-top:8px">Model fleet: ${Math.round(100 * F.trial_rate)}% of ${esc(F.levels.join("/"))} trains try a challenger from their class's price band for spec and first build. After ${F.min_samples}+ trains each, one that arrives first time as often for no more per arrival becomes the class's model; one far worse sits out. Retired or repriced models are replaced from the band. Pin a class in <code>models.json</code> to keep it fixed.</p>`;
+}
+
+// "builder+1[..express]" → "one class up, at most Limited Express"
+function choiceLabel(choice) {
+  const m = /^builder([+-]\d+)?(?:\[(\w*)\.\.(\w*)\])?$/.exec(choice);
+  if (!m) return S.service_classes[choice]?.label || choice;
+  const n = Number(m[1] || 0), name = (c) => S.service_classes[c]?.label || c;
+  const parts = [n === 0 ? "item's class" : `${Math.abs(n)} class${Math.abs(n) > 1 ? "es" : ""} ${n > 0 ? "up" : "down"}`];
+  if (m[2] && m[3]) parts.push(`${name(m[2])}–${name(m[3])}`);
+  else if (m[2]) parts.push(`at least ${name(m[2])}`);
+  else if (m[3]) parts.push(`at most ${name(m[3])}`);
+  return parts.join(", ");
 }
 
 /* ── retrospectives & playbook ───────────────────────── */

@@ -8,7 +8,8 @@ notification to whatever you configure:
                              _ITEM_ID are set in its environment
   AGENT_TEAM_NOTIFY_WEBHOOK  a URL that receives the same JSON as a POST
   AGENT_TEAM_NOTIFY_EVENTS   which events to send (default:
-                             gate,failed,suspended,regression,reverted,stalled;
+                             gate,failed,suspended,regression,reverted,stalled,
+                             autopilot,routing;
                              "done" is also available)
 
 Delivery runs on a background thread so a slow hook never stalls the line.
@@ -37,6 +38,7 @@ EVENTS = {
     "reverted": "A merge was reverted automatically after a regression",
     "stalled": "A project's dispatcher paused after repeated rejections",
     "autopilot": "Autopilot switched on or off (switching off includes the 'while you were away' report)",
+    "routing": "The model fleet changed a class's model (promotion, replacement) or benched a challenger",
 }
 
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")

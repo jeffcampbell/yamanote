@@ -7,7 +7,9 @@ and model routing can be overridden with a models.json next to this package.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -110,22 +112,69 @@ DIFFICULTY_TO_CLASS = {
     "hard": "express", "very hard": "express",
 }
 
-# Per-station model: either a service class name, "builder" (= the item's
-# class), "builder+1" (one class above the item's), or a literal model id.
+# Per-station model. A value is one of:
+#   a service class name       "rapid"
+#   the train's class           "builder", or relative to it: "builder+1", "builder-1"
+#   either of those, clamped    "builder[rapid..express]", "builder+1[..express]"
+#   a literal OpenRouter model  "openai/gpt-6"
+# Stations that run before a train has a class (dispatcher, triage) use a fixed class;
+# a train without one yet counts as "rapid".
 STATION_MODELS: dict[str, str] = {
     "dispatcher": "rapid",
     "triage":     "local",
-    "spec":       "rapid",
+    "spec":       "builder[local..express]",   # trivial work gets a cheap spec, hard work a strong one
     "build":      "builder",
     "inspect":    "builder+1",
-    "verify":     "rapid",
+    "verify":     "builder[rapid..express]",
     "signal":     "local",
     "ops":        "local",
     "redact":     "local",
-    "retro":      "rapid",
+    "retro":      "builder[rapid..express]",
     "retro_retry": "builder",  # set to one class above "retro" when a retrospective comes back unusable
 }
+
+_CHOICE = re.compile(r"builder(?P<delta>[+-]\d+)?(?:\[(?P<lo>\w*)\.\.(?P<hi>\w*)\])?")
+
+
+def station_class(choice: str, item_class: str | None) -> str | None:
+    """The service class a STATION_MODELS value resolves to for a train of
+    `item_class`, or None when the value is a literal model id."""
+    if choice in SERVICE_CLASSES:
+        return choice
+    m = _CHOICE.fullmatch(choice)
+    if not m or any(b and b not in CLASS_ORDER for b in (m["lo"], m["hi"])):
+        return None
+    order = CLASS_ORDER
+    base = order.index(item_class) if item_class in order else order.index("rapid")
+    lo = order.index(m["lo"]) if m["lo"] in order else 0
+    hi = order.index(m["hi"]) if m["hi"] in order else len(order) - 1
+    return order[max(lo, min(hi, base + int(m["delta"] or 0)))]
 FALLBACK_MODEL = _env("YAMANOTE_FALLBACK_MODEL", "openrouter/auto")
+
+# ─── Model fleet (see fleet.py) ──────────────────────────────────────────────
+# The models above are only starting points. Once a day the fleet reads
+# OpenRouter's catalogue, sorts usable models into each class's price band, and
+# tries challengers on a share of low-risk trains; one that does at least as
+# well for no more money becomes the class's model. Classes named in
+# models.json "classes" are pinned and never change.
+FLEET_ENABLED = _env_bool("AGENT_TEAM_MODEL_FLEET", True)
+TRIAL_RATE = _env_float("AGENT_TEAM_MODEL_TRIAL_RATE", 0.10)   # share of eligible trains that try a challenger
+TRIAL_LEVELS = ("trivial", "small")      # only low-risk work runs trials
+TRIAL_STATIONS = ("spec", "build")       # first build only; a rework goes back to the class's model
+TRIAL_MIN_SAMPLES = 8                    # trains each side before a challenger can be promoted or benched
+TRIAL_BENCH_DAYS = 30                    # a clearly worse challenger sits out this long
+CHALLENGERS_PER_CLASS = 3
+CATALOG_URL = _env("YAMANOTE_CATALOG_URL", "https://openrouter.ai/api/v1/models")
+CATALOG_REFRESH_SECONDS = 86400
+FLEET_EVALUATE_SECONDS = 3600
+MIN_CONTEXT_TOKENS = 128_000
+EXPIRY_MARGIN_DAYS = 30                  # replace a model this long before OpenRouter retires it
+JEV_ROUTER_MODEL = "typesafe/jev-router" # tried as a challenger in every class below Shinkansen
+# Upper price of each class, in USD per million input tokens with output and cache
+# reads folded in at this line's measured mix (fleet.blended_price). Shinkansen is
+# everything above Limited Express.
+CLASS_BANDS: dict[str, float | None] = {"local": 0.15, "rapid": 0.60, "express": 1.80, "shinkansen": None}
+PINNED_CLASSES: set[str] = set()
 ESCALATE_AFTER = 1  # reworks on the same class before escalating
 
 
@@ -139,12 +188,22 @@ def _load_model_overrides() -> None:
     for name, model in (data.get("classes") or {}).items():
         if name in SERVICE_CLASSES and isinstance(model, str):
             SERVICE_CLASSES[name]["model"] = model
+            PINNED_CLASSES.add(name)
+    for name, ceiling in (data.get("bands") or {}).items():
+        if name in CLASS_BANDS and (ceiling is None or isinstance(ceiling, (int, float))):
+            CLASS_BANDS[name] = ceiling
     for station, choice in (data.get("stations") or {}).items():
         if isinstance(choice, str):
+            if "/" not in choice and station_class(choice, None) is None:
+                logging.getLogger("yamanote.settings").warning(
+                    "models.json: %s → %r is neither a class, a builder choice, nor a provider/model id",
+                    station, choice)
             STATION_MODELS[station] = choice
 
 
 _load_model_overrides()
+# What each class starts on (after models.json); the fleet moves classes on from here.
+DEFAULT_CLASS_MODELS = {c: v["model"] for c, v in SERVICE_CLASSES.items()}
 
 # ─── Capacity, timing, guardrails ────────────────────────────────────────────
 
@@ -204,12 +263,12 @@ AUTO_REVERT = _env_bool("AGENT_TEAM_AUTO_REVERT", False)  # revert the merge whe
 NOTIFY_CMD = _env("AGENT_TEAM_NOTIFY_CMD", "")
 NOTIFY_WEBHOOK = _env("AGENT_TEAM_NOTIFY_WEBHOOK", "")
 NOTIFY_EVENTS = {e.strip() for e in _env(
-    "AGENT_TEAM_NOTIFY_EVENTS", "gate,failed,suspended,regression,reverted,stalled,autopilot").split(",") if e.strip()}
+    "AGENT_TEAM_NOTIFY_EVENTS", "gate,failed,suspended,regression,reverted,stalled,autopilot,routing").split(",") if e.strip()}
 NOTIFY_TIMEOUT_SECONDS = 30
 PUBLIC_URL = _env("AGENT_TEAM_PUBLIC_URL", "").rstrip("/")  # dashboard URL used for links in notifications
 
 # ─── Learning ────────────────────────────────────────────────────────────────
-ADAPTIVE_ROUTING = _env_bool("AGENT_TEAM_ADAPTIVE_ROUTING", False)  # let history move difficulty→class
+ADAPTIVE_ROUTING = _env_bool("AGENT_TEAM_ADAPTIVE_ROUTING", True)  # let history move difficulty→class
 ADAPTIVE_MIN_SAMPLES = 5
 # Every train ends at JY09 Retro: a retrospective that writes per-station
 # playbook notes for future trains on the project, retires notes that aren't

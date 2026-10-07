@@ -90,7 +90,8 @@ def routing(factory) -> dict:
             src = next((r for r in stats if r["difficulty"] == row["difficulty"] and r["cls"] == h["cls"]), {})
             h.update(underpowered=src.get("underpowered") or 0, overpowered=src.get("overpowered") or 0,
                      retros=src.get("retros") or 0)
-    return {"adaptive": settings.ADAPTIVE_ROUTING, "min_samples": settings.ADAPTIVE_MIN_SAMPLES, "levels": rows}
+    return {"adaptive": settings.ADAPTIVE_ROUTING, "min_samples": settings.ADAPTIVE_MIN_SAMPLES, "levels": rows,
+            "fleet": factory.fleet.status()}
 
 
 def item_detail(factory, item_id: int) -> dict | None:

@@ -1,19 +1,22 @@
 {
   "classes": {
-    "local": "deepseek/deepseek-v4-pro",
-    "rapid": "minimax/minimax-m3",
-    "express": "anthropic/claude-sonnet-5.5",
     "shinkansen": "anthropic/claude-opus-5.5"
+  },
+  "bands": {
+    "local": 0.15,
+    "rapid": 0.6,
+    "express": 1.8,
+    "shinkansen": null
   },
   "stations": {
     "dispatcher": "rapid",
     "triage": "local",
-    "spec": "rapid",
+    "spec": "builder[local..express]",
     "build": "builder",
     "inspect": "builder+1",
-    "verify": "rapid",
+    "verify": "builder[rapid..express]",
     "redact": "local",
-    "retro": "rapid",
+    "retro": "builder[rapid..express]",
     "signal": "local",
     "ops": "local"
   }

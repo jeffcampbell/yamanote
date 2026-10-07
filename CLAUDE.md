@@ -14,6 +14,7 @@ OpenRouter agents at each station and Jev (via the
 | `llm.py` | OpenRouter client: exact cost from `usage.cost`, fallbacks, Anthropic cache breakpoints |
 | `stats.py` | Stats view numbers, computed from the store per request |
 | `telemetry.py` | OpenTelemetry export: train traces (GenAI conventions) + metrics over OTLP/HTTP JSON |
+| `fleet.py` | Model fleet: daily OpenRouter catalogue, price bands per class, challenger trials, promotion and replacement |
 | `cron.py` | Five-field cron parser (`prev`/`next`) for the autopilot schedule |
 | `store.py` | SQLite: items, events, runs, steps, retros, kv. `Store.transition()` is compare-and-set — use it for status changes from jobs |
 | `prompts.py` | Station system prompts + JSON result schemas |
@@ -34,6 +35,9 @@ OpenRouter agents at each station and Jev (via the
   Chrome can't go below 500px, so load the page in an iframe of the target width. Use
   `--timeout` ≥ 25000 and a fresh `--user-data-dir`: a short timeout cancels in-flight
   fetches and captures a half-loaded page that looks like an app bug.
+- The fleet changes `settings.SERVICE_CLASSES` at runtime; the configured starting
+  models are `settings.DEFAULT_CLASS_MODELS`. Tests run with the fleet off and no
+  trials (tests/helpers.py); fleet tests pass a fake `fetch` and `rng`.
 - Exported OpenTelemetry counters must never decrease: derive them from append-only
   data (events, finished runs, kv merge stats), not from current item/run status.
 - Tests finish journeys in milliseconds; anything that compares timestamps needs a test

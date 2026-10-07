@@ -23,7 +23,7 @@ Raspberry Pi (or any machine) as a systemd service.
 
 ## Contents
 
-- [The line](#the-line) · [Service classes](#service-classes) · [Line-wide crew](#line-wide-crew)
+- [The line](#the-line) · [Service classes](#service-classes) · [Model fleet](#model-fleet) · [Line-wide crew](#line-wide-crew)
 - [Autopilot](#autopilot-自動運転) · [Checks and the merge queue](#checks-and-the-merge-queue)
 - [Retrospective & continuous learning](#retrospective--continuous-learning)
 - [Post-deploy watch](#post-deploy-watch) · [Notifications](#notifications-hooks)
@@ -64,8 +64,8 @@ class each time.
 
 ### Service classes
 
-Each train's **service class** picks the model it runs on. Jev scores the item's
-difficulty at Triage; repeated rework escalates the train.
+Each train's **service class** sets how strong a model works on it. Jev scores the
+item's difficulty at Triage; repeated rework escalates the train.
 
 | Class | | Used for | Default model |
 |---|---|---|---|
@@ -74,20 +74,75 @@ difficulty at Triage; repeated rework escalates the train.
 | Limited Express | 特急 | hard / very hard | `anthropic/claude-sonnet-5.5` |
 | Shinkansen | 新幹線 | escalation only | `anthropic/claude-opus-5.5` |
 
+The class reaches most stations, not just the builder:
+
+| Station | Model |
+|---|---|
+| Triage, Signal, Ops, Redactor | Local (fixed) |
+| Dispatcher | Rapid (fixed; no train yet) |
+| Spec | the train's class, Local–Limited Express |
+| Build | the train's class |
+| Inspect | one class above the train's |
+| Verify, Retro | the train's class, Rapid–Limited Express |
+
+So a trivial fix gets a cheap spec, and hard work gets a strong spec writer and
+verifier. A train with no class yet counts as Rapid.
+
 Train numbers carry the class the train departed in (`0042G` Local, `K` Rapid, `E`
 Limited Express, `S` Shinkansen) and keep it even if the train escalates.
 
-**Adaptive routing** (`AGENT_TEAM_ADAPTIVE_ROUTING=1`, off by default): with 5+
+**Adaptive routing** (on by default; `AGENT_TEAM_ADAPTIVE_ROUTING=0` turns it off): with 5+
 finished items, a difficulty level whose class passes first time less than 50% of the
 time — or that retrospectives mostly call too weak — is moved up a class; one passing
 over 90% first time, or that retrospectives call overkill, tries a class cheaper. It
 never auto-routes to Shinkansen. The routing card on the dashboard shows the history
 either way.
 
-Override any class or station in `models.json` (see `models.json.example`). Station
-values are a class name, `builder` (the train's class), `builder+1`, or a literal
-OpenRouter model id. Every call lists `openrouter/auto` as a fallback
-(`YAMANOTE_FALLBACK_MODEL`).
+### Model fleet
+
+The models in the class table are starting points, not fixed picks. New models arrive on
+OpenRouter every week and old ones are retired, so the **model fleet** keeps each class
+current:
+
+- **Catalogue.** Once a day Yamanote reads OpenRouter's public model list (no key
+  needed). It keeps models that can call tools, return structured output and hold
+  128K+ tokens of context. Free and batch variants, moving aliases (`~…`) and models
+  retiring within 30 days are dropped. OpenRouter's programming ranking, which orders
+  models by how much developers use them, decides which are worth trying first.
+- **Price bands.** Each class is a price ceiling in USD per million input tokens, with
+  output and cache reads folded in at the line's measured mix: Local ≤ $0.15,
+  Rapid ≤ $0.60, Limited Express ≤ $1.80, Shinkansen above. New models land in their
+  band automatically.
+- **Trials.** 10% of trivial and small trains try a challenger for their spec and first
+  build. Challengers are the band's three best-ranked models plus TypeSafe's
+  [Jev Router](https://openrouter.ai/typesafe/jev-router), which picks a model per
+  request. Verify and inspect stay on the class's model, and a rework goes back to it.
+- **Promotion.** Once a challenger and the class's model each have 8+ trains, a
+  challenger that arrived first time at least as often, for no more per arrival,
+  becomes the class's model. One that does 25 points worse sits out for 30 days.
+- **Replacement.** If a class's model leaves OpenRouter, nears retirement or is
+  repriced well above its band, the best-ranked model in the band takes over. If none
+  is ranked, the old model stays and you're told once.
+
+Every change is recorded in the line announcements, shown on the routing card, and sent
+as a `routing` notification. Trials only run on low-risk work, so in practice the
+cheaper classes learn from results and the expensive ones change only when their model
+stops being usable. `AGENT_TEAM_MODEL_TRIAL_RATE` sets the trial share (0 stops
+trials), and `AGENT_TEAM_MODEL_FLEET=0` turns the fleet off.
+
+### models.json
+
+Override classes, stations and bands in `models.json` (see `models.json.example`):
+
+- `classes` **pins** a class to a model: the fleet never trials or replaces it.
+  Copying the whole table pins every class.
+- `bands` moves the price ceilings (`null` = no ceiling).
+- `stations` sets each station's model. Values are a class name; `builder` (the
+  train's class), or relative to it, such as `builder+1` or `builder-1`; either of
+  those clamped to a range, like `builder[rapid..express]` or `builder+1[..express]`;
+  or a literal OpenRouter model id.
+
+Every call lists `openrouter/auto` as a fallback (`YAMANOTE_FALLBACK_MODEL`).
 
 ### Line-wide crew
 
@@ -204,7 +259,7 @@ own. Configure either or both:
 AGENT_TEAM_NOTIFY_CMD='your-signal-cli send "$YAMANOTE_TITLE: $YAMANOTE_MESSAGE $YAMANOTE_URL"'
 # A webhook: receives the same JSON as a POST.
 AGENT_TEAM_NOTIFY_WEBHOOK=https://example.com/hooks/yamanote
-AGENT_TEAM_NOTIFY_EVENTS=gate,failed,suspended,regression,reverted,stalled,autopilot   # the default
+AGENT_TEAM_NOTIFY_EVENTS=gate,failed,suspended,regression,reverted,stalled,autopilot,routing   # the default
 AGENT_TEAM_PUBLIC_URL=http://raspi-5.local:8080    # used for deep links in messages
 ```
 
@@ -218,6 +273,7 @@ AGENT_TEAM_PUBLIC_URL=http://raspi-5.local:8080    # used for deep links in mess
 | `reverted` | A merge was reverted automatically |
 | `stalled` | A project's dispatcher paused after repeated rejections |
 | `autopilot` | Autopilot switched on or off; switching off carries the "while you were away" report |
+| `routing` | The model fleet promoted, replaced or benched a model |
 
 Payload:
 
@@ -257,8 +313,9 @@ announcements and never stall the line.
   run with its tool calls streaming live.
 - **Crew & signals** — Dispatcher/Signal/Ops/Jev status, each project's checks and
   post-deploy watch, notification status, latest ops report.
-- **Service classes & routing** — model per class with 24h spend and cache-hit rate,
-  difficulty → class routing with first-pass rate, fare and class-fit votes.
+- **Service classes & routing** — model per class with its price, 24h spend, cache-hit
+  rate and the challengers it is trialling; difficulty → class routing with first-pass
+  rate, fare and class-fit votes; station → class choices; recent model-fleet changes.
 - **Line announcements** — the event feed.
 - **Stats 統計** — a second view with history; see [Stats & observability](#stats--observability).
 - **Retro 振り返り** — a third view (`/#retro`): each retrospective over 7 / 30 / 90 days
@@ -453,7 +510,7 @@ the service user passwordless sudo for exactly that command.
 |---|---|
 | `.env` | Keys and settings (every variable is listed with its default in `.env.example`) |
 | `projects.json` | Which projects to work on, with per-project schedule, priority, gates, setup/test commands and decide backend (`projects.json.example`) |
-| `models.json` | Model per service class and per station (`models.json.example`) |
+| `models.json` | Pinned class models, price bands and per-station models (`models.json.example`) |
 | `agents/` | Runtime data: `yamanote.db` (SQLite: items, events, runs, steps, retros, playbooks), the `pause` file and the PID lock. Move it with `YAMANOTE_DATA_DIR` |
 
 ### Multiple projects
