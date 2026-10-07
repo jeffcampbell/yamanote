@@ -54,6 +54,7 @@ function svcBadge(cls) {
 const VERB = { triage: "TRIAGING", spec: "SPECIFYING", build: "BUILDING", inspect: "INSPECTING", verify: "VERIFYING", merge: "MERGING", deploy: "DEPLOYING", retro: "REFLECTING" };
 function boardStatus(it) {
   const now = Date.now() / 1000;
+  if (it.status === "waiting" && it.gate === "board") return ["st-signal", "PROPOSED · BOARD?"];
   if (it.status === "waiting") return ["st-signal", `SIGNAL · ${it.gate === "spec" ? "SPEC" : "MERGE"} OK?`];
   if (it.status === "held") return ["st-held", "HELD"];
   if (it.status === "running") return ["st-run", VERB[it.station] || "RUNNING"];
@@ -119,9 +120,18 @@ function render() {
 
 function renderTopbar() {
   const pill = $("#line-status");
+  const ap = S.autopilot || {};
   if (S.paused) { pill.className = "pill pill-warn"; pill.textContent = "■ Paused · 運転見合わせ"; }
   else if (S.suspended) { pill.className = "pill pill-bad"; pill.textContent = "■ Suspended"; }
-  else { pill.className = "pill pill-ok"; pill.textContent = "● In service · 運転中"; }
+  else if (ap.on) { pill.className = "pill pill-auto"; pill.textContent = "◐ Autopilot · 自動運転"; }
+  else { pill.className = "pill pill-ok"; pill.textContent = "● Supervised · 運転中"; }
+  const sw = $("#btn-autopilot");
+  sw.setAttribute("aria-checked", ap.on ? "true" : "false");
+  const next = ap.config?.schedule_enabled ? (ap.on ? ap.preview?.next_off : ap.preview?.next_on) : null;
+  sw.title = (ap.on ? `Autopilot on since ${hm(ap.since)} (${ap.source})` : "Autopilot off — supervised")
+    + (next ? ` · scheduled to switch ${new Date(next * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false })}` : "");
+  document.body.classList.toggle("autopilot", !!ap.on);
+  renderAwayBanner();
   $("#btn-pause").textContent = S.paused ? "Resume line" : "Pause line";
   const b = S.budget;
   $("#budget-spent").textContent = money(b.spent_today);
@@ -133,6 +143,18 @@ function renderTopbar() {
   const banner = $("#suspended-banner");
   banner.hidden = !S.suspended;
   if (S.suspended) banner.textContent = "Service suspended: " + S.suspended + ". Running jobs finish; no new departures.";
+}
+
+function renderAwayBanner() {
+  const el = $("#away-banner"), r = S.autopilot_report;
+  let dismissed = "";
+  try { dismissed = localStorage.getItem("yamanote-away-dismissed") || ""; } catch {}
+  if (!r || S.autopilot?.on || String(r.id) === dismissed || Date.now() / 1000 - r.ts > 2 * 86400) { el.hidden = true; return; }
+  const d = r.data || {};
+  const links = (list, label) => list && list.length ? ` ${label}: ` + list.map((i) => `<a data-id="${i.id}">#${i.id}</a>`).join(", ") + "." : "";
+  el.innerHTML = `<span class="away-body"><b>While you were away</b> (${esc(hm(d.start))}–${esc(hm(d.end))}) — ${esc(r.message.replace(/^Autopilot ran [^:]+: /, ""))}${links(d.failed, "Failed")}${links(d.waiting, "Waiting")}</span><button aria-label="Dismiss" title="Dismiss">×</button>`;
+  el.hidden = false;
+  el.querySelector("button").onclick = () => { try { localStorage.setItem("yamanote-away-dismissed", String(r.id)); } catch {} el.hidden = true; };
 }
 
 function renderKpis() {
@@ -474,6 +496,7 @@ function addFeed(evts) {
 const QUIET = new Set(["classified", "context", "watching"]);
 function renderFeed() {
   $("#feed").innerHTML = feed.filter((e) => !QUIET.has(e.kind)).slice(0, 80).map((e) => {
+    if (e.kind === "autopilot_report") return `<li class="k-ops_report"><span class="t">${esc(hm(e.ts))}</span><div class="ops-report">🌙 ${esc(e.message)}</div></li>`;
     if (e.kind === "ops_report") return `<li class="k-ops_report"><span class="t">${esc(hm(e.ts))}</span><div class="ops-report">${esc(e.message)}</div></li>`;
     const st = e.station ? station(e.station).code : "LINE";
     const who = e.item_id ? `<a data-id="${e.item_id}">#${e.item_id}</a> ${esc(titleFor(e.item_id))} — ` : "";
@@ -551,13 +574,17 @@ function renderDrawer() {
   const spentTime = (it.finished_at || Date.now() / 1000) - (it.started_at || it.created_at);
   let html = `<div class="d-kicker"><span>TRAIN ${esc(trainNo(it))}</span><span>·</span><span>${esc(base(it.project))}</span><span>·</span><span>${esc(it.kind)}</span><span>·</span><span>${esc(it.priority)} priority</span><span>·</span><span>from ${esc(it.source)}</span></div>
     <h2 class="d-title">${esc(it.title)}</h2>
-    <div class="d-meta">${svcBadge(it.service_class)}
+    <div class="d-meta">${it.service_class ? svcBadge(it.service_class) : ""}
       ${it.difficulty ? `<span class="chip">difficulty: ${esc(it.difficulty)}${it.difficulty_score != null ? " (" + Number(it.difficulty_score).toFixed(1) + "/4)" : ""}</span>` : ""}
       ${it.train ? `<span class="chip">train set ${esc(it.train)}</span>` : ""}
       ${it.branch ? `<span class="chip" title="git branch"><code>${esc(it.branch)}</code></span>` : ""}
       ${it.parent_id ? `<a class="chip" data-train="${it.parent_id}" href="#item-${it.parent_id}">regression from #${it.parent_id}</a>` : ""}</div>`;
   html += routeStrip(it, events);
-  if (it.status === "waiting") {
+  if (it.status === "waiting" && it.gate === "board") {
+    html += `<div class="gate-box"><h4>■ PROPOSED BY ${esc(it.source.toUpperCase())} — BOARD THIS TRAIN?</h4>
+      <p class="small">The factory proposed this work itself. In Supervised mode it waits here until you board it; Autopilot boards proposals automatically.</p>
+      <div class="d-actions"><button class="btn btn-primary" data-act="approve">Board</button><button class="btn btn-danger" data-act="reject">Decline</button></div></div>`;
+  } else if (it.status === "waiting") {
     html += `<div class="gate-box"><h4>■ SIGNAL AT RED — ${it.gate === "spec" ? "SPEC APPROVAL" : "MERGE APPROVAL"}</h4>
       <p class="small">${it.gate === "spec" ? "Review the spec and holdout scenarios, then let the train depart to Build." : `Inspector approved and holdout satisfaction is ${pct(it.satisfaction)}. Approve to merge <code>${esc(it.branch)}</code> into trunk.`}</p>
       <div class="d-actions"><button class="btn btn-primary" data-act="approve">Approve</button><button class="btn btn-danger" data-act="reject">Reject</button></div></div>`;
@@ -686,7 +713,7 @@ function connect() {
 /* ── wiring ───────────────────────────────────────────── */
 function wire() {
   document.addEventListener("click", (e) => {
-    const row = e.target.closest(".board-row.item, #feed a[data-id]");
+    const row = e.target.closest(".board-row.item, #feed a[data-id], #away-banner a[data-id]");
     if (row) return openItem(Number(row.dataset.id));
     const chip = e.target.closest("[data-train]");
     if (chip) return openItem(Number(chip.dataset.train));
@@ -728,6 +755,22 @@ function wire() {
   $("#drawer-close").addEventListener("click", closeDrawer);
   $("#scrim").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openId) closeDrawer(); });
+  $("#btn-autopilot").addEventListener("click", () => {
+    const on = !(S?.autopilot?.on);
+    if (on) {
+      const waiting = (S?.items || []).filter((i) => i.status === "waiting").length;
+      if (!confirm("Turn on Autopilot?\n\nThe line runs dark: approval gates are skipped" + (waiting ? ` (${waiting} waiting train${waiting > 1 ? "s" : ""} will be released)` : "") +
+        ", proposals board themselves, and post-deploy regressions are reverted automatically.")) return;
+    }
+    post("/api/autopilot", { on }).then(() => refreshSoon(50)).catch(alertErr);
+  });
+  $("#btn-settings").addEventListener("click", openSettings);
+  $("#settings-cancel").addEventListener("click", () => $("#settings-dialog").close());
+  $("#settings-form").addEventListener("submit", saveSettings);
+  $$("[data-preset]").forEach((b) => b.addEventListener("click", () => {
+    const [on, off] = b.dataset.preset.split("|"), f = $("#settings-form");
+    f.on_cron.value = on; f.off_cron.value = off; f.schedule_enabled.checked = true;
+  }));
   $("#btn-pause").addEventListener("click", () => post(S?.paused ? "/api/resume" : "/api/pause").then(() => refreshSoon(50)).catch(alertErr));
 
   const dlg = $("#new-dialog");
@@ -754,6 +797,57 @@ function wire() {
   });
 }
 
+function fmtWhen(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false }) : "never";
+}
+function renderSettingsInfo() {
+  const ap = S?.autopilot;
+  if (!ap) return;
+  $("#set-mode").innerHTML = ap.on
+    ? `Now: <b>Autopilot</b> since ${esc(fmtWhen(ap.since))} (${esc(ap.source)}).`
+    : `Now: <b>Supervised</b> since ${esc(fmtWhen(ap.since))} (${esc(ap.source)}).`;
+  const p = ap.preview || {};
+  $("#set-preview").textContent = p.error ? "⚠ " + p.error
+    : ap.config.schedule_enabled ? `Next: autopilot on ${fmtWhen(p.next_on)} · off ${fmtWhen(p.next_off)}` : "Schedule off.";
+  const all = (S.projects || []).map((p) => p.name);
+  const tested = all.filter((n) => !ap.untested.includes(n));
+  $("#set-untested").textContent = !all.length ? "No projects are configured yet."
+    : ap.untested.length
+      ? `${ap.untested.join(", ")} ${ap.untested.length > 1 ? "have" : "has"} no test command. With this off, ${ap.untested.length > 1 ? "their" : "its"} trains stop at the merge gate even in autopilot and wait for you; with it on, they merge on holdout scenarios and code review alone.`
+        + (tested.length ? ` ${tested.join(", ")} ${tested.length > 1 ? "are" : "is"} tested and merge${tested.length > 1 ? "" : "s"} unattended either way.` : "")
+      : `This only affects projects without a test command. Every project has one, so autopilot already merges them once their tests and holdout scenarios pass. (Currently: ${tested.join(", ")})`;
+}
+function openSettings() {
+  const ap = S?.autopilot;
+  if (!ap) return;
+  const f = $("#settings-form"), c = ap.config;
+  f.schedule_enabled.checked = !!c.schedule_enabled;
+  f.on_cron.value = c.on_cron || "";
+  f.off_cron.value = c.off_cron || "";
+  f.merge_without_tests.checked = !!c.merge_without_tests;
+  f.gate_spec.checked = !!c.supervised_gates?.spec;
+  f.gate_merge.checked = !!c.supervised_gates?.merge;
+  $("#settings-error").hidden = true;
+  renderSettingsInfo();
+  $("#settings-dialog").showModal();
+}
+async function saveSettings(e) {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await post("/api/autopilot/settings", {
+      schedule_enabled: f.schedule_enabled.checked, on_cron: f.on_cron.value.trim(), off_cron: f.off_cron.value.trim(),
+      merge_without_tests: f.merge_without_tests.checked,
+      supervised_gates: { spec: f.gate_spec.checked, merge: f.gate_merge.checked },
+    });
+    await refresh();
+    renderSettingsInfo();
+    $("#settings-dialog").close();
+  } catch (err) {
+    const el = $("#settings-error"); el.textContent = err.message; el.hidden = false;
+  }
+}
+
 function tickClock() {
   $("#clock").textContent = new Date().toLocaleTimeString([], { hour12: false }) + (S ? " · up " + dur(S.uptime + (Date.now() / 1000 - S.now)) : "");
 }
@@ -769,5 +863,6 @@ async function boot() {
   window.addEventListener("resize", () => renderDiagram());
   const m = location.hash.match(/^#item-(\d+)$/);
   if (m) openItem(Number(m[1]));
+  if (location.hash === "#settings") openSettings();
 }
 boot();

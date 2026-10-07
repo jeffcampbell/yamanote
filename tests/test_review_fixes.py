@@ -73,14 +73,14 @@ class LifecycleTest(FactoryTestCase):
     def test_third_hold_becomes_a_reject(self):
         patch(self, settings, "HOLD_RECYCLE_SECONDS", 0)
         f = self.make(triage=lambda m, t: finish("x", {"verdict": "HOLD", "reason": "vague"}))
-        item = f.create_item("meh", "x", source="dispatcher")
+        item = self.board(f.create_item("meh", "x", source="dispatcher"))
         self.assertTrue(run_until(f, lambda: self.item(item["id"])["status"] == "rejected", max_ticks=300))
         self.assertEqual([e["kind"] for e in self.store.events(item["id"])].count("held"), settings.MAX_HOLDS)
         self.assertIn("held 2 times", self.item(item["id"])["outcome"])
 
     def test_retry_resets_counters_and_skips_triage(self):
         f = self.make(triage=lambda m, t: finish("no", {"verdict": "REJECT", "reason": "nope"}))
-        item = f.create_item("thing", "x", source="dispatcher")
+        item = self.board(f.create_item("thing", "x", source="dispatcher"))
         self.assertTrue(run_until(f, lambda: self.item(item["id"])["status"] == "rejected"))
         self.store.kv_set(f"retries:{item['id']}:spec", 2)
         f.retry(item["id"])

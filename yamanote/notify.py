@@ -36,6 +36,7 @@ EVENTS = {
     "regression": "New errors appeared in the app logs shortly after a deploy",
     "reverted": "A merge was reverted automatically after a regression",
     "stalled": "A project's dispatcher paused after repeated rejections",
+    "autopilot": "Autopilot switched on or off (switching off includes the 'while you were away' report)",
 }
 
 _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")

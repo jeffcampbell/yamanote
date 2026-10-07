@@ -23,7 +23,7 @@ Raspberry Pi (or any machine) as a systemd service.
 ## Contents
 
 - [The line](#the-line) · [Service classes](#service-classes) · [Line-wide crew](#line-wide-crew)
-- [Checks and the merge queue](#checks-and-the-merge-queue)
+- [Autopilot](#autopilot-自動運転) · [Checks and the merge queue](#checks-and-the-merge-queue)
 - [Retrospective & continuous learning](#retrospective--continuous-learning)
 - [Post-deploy watch](#post-deploy-watch) · [Notifications](#notifications-hooks)
 - [Dashboard](#dashboard) · [API](#api)
@@ -98,6 +98,39 @@ OpenRouter model id. Every call lists `openrouter/auto` as a fallback
 - **Operations** writes an hourly digest of the line with recommendations drawn from
   the real settings list. It does not edit code.
 
+## Autopilot 自動運転
+
+The line runs in one of two modes, switched from the **Autopilot** toggle in the
+dashboard header or on a schedule:
+
+| | Supervised (運転中) | Autopilot (自動運転) — "dark" |
+|---|---|---|
+| Spec / merge approval gates | As configured in Settings (per-project `gates` in projects.json win) | Skipped |
+| Work proposed by the Dispatcher or Signal | Waits at Intake until a human clicks **Board** (or **Decline**) | Boards itself |
+| Your own requests | Run as usual | Run as usual |
+| Post-deploy regressions | Filed as linked bugs | Filed **and reverted** automatically |
+| Projects without a test command | Merge per the gates | Stop at the merge gate, unless **Merge projects that have no test command** is on |
+
+Turning autopilot on **releases trains already waiting** at a gate (under the rules
+above). Turning it off posts a **"while you were away"** report — trains arrived,
+failed and not in service, regressions and reverts, new playbook notes, spend, and
+what's now waiting for you — as a dashboard banner, a line announcement and an
+`autopilot` notification, so it's on your phone in the morning.
+
+**Settings (⚙ in the header)** holds the schedule — two cron expressions in local time,
+one to switch autopilot on and one to switch it off, e.g. `0 22 * * *` and
+`0 7 * * 1-5`, with presets for nights, weeknights and weekends — plus the
+merge-without-tests rule and the Supervised gates. It works like a thermostat: a manual
+switch holds until the next scheduled change, and saving a new schedule puts the line
+into whatever mode it says for right now. The schedule catches up after the machine
+sleeps. Settings are stored in the database; `AGENT_TEAM_AUTOPILOT*` environment
+variables only seed them on first start. Open Settings directly with `/#settings`.
+
+A short pause still outranks either mode: **Pause line** stops departures in both.
+
+<!-- screenshot: img/yamanote_settings.png — the ⚙ Settings dialog with an overnight autopilot
+     schedule filled in (open /#settings), ~1280px wide -->
+
 ## Checks and the merge queue
 
 Give each project its own commands in `projects.json` (or `AGENT_TEAM_SETUP_CMD` /
@@ -169,19 +202,20 @@ own. Configure either or both:
 AGENT_TEAM_NOTIFY_CMD='your-signal-cli send "$YAMANOTE_TITLE: $YAMANOTE_MESSAGE $YAMANOTE_URL"'
 # A webhook: receives the same JSON as a POST.
 AGENT_TEAM_NOTIFY_WEBHOOK=https://example.com/hooks/yamanote
-AGENT_TEAM_NOTIFY_EVENTS=gate,failed,suspended,regression,reverted,stalled   # the default
+AGENT_TEAM_NOTIFY_EVENTS=gate,failed,suspended,regression,reverted,stalled,autopilot   # the default
 AGENT_TEAM_PUBLIC_URL=http://raspi-5.local:8080    # used for deep links in messages
 ```
 
 | Event | When |
 |---|---|
-| `gate` | A train is waiting for spec or merge approval |
+| `gate` | A train is waiting for spec or merge approval, or a proposal is waiting to be boarded |
 | `failed` | A train was terminated (gave up, SLA, persistent conflict, over budget) |
 | `done` | A train arrived (off by default) |
 | `suspended` | Departures stopped: daily budget, out of OpenRouter credit, rate limits, network down |
 | `regression` | New errors appeared in the app logs soon after a deploy |
 | `reverted` | A merge was reverted automatically |
 | `stalled` | A project's dispatcher paused after repeated rejections |
+| `autopilot` | Autopilot switched on or off; switching off carries the "while you were away" report |
 
 Payload:
 
@@ -212,7 +246,8 @@ announcements and never stall the line.
   one line per train over the last 3h / 12h / 24h / 7d. Bottlenecks show up as long
   flat runs; reworks as dashed jumps back up the line.
 - **Departures / Arrivals boards** — every work item with its service class, current
-  station, status (on time, rework, delayed, signal, reflecting), journey time and fare.
+  station, status (on time, rework, delayed, signal, proposed, reflecting), journey time
+  and fare.
   Columns drop away gracefully as the board narrows.
 - **Train drawer** (click any train) — door-LCD route strip, gate Approve/Reject,
   Cancel/Retry, fare/tokens/attempts/satisfaction, and tabs for the event timeline, the
@@ -224,8 +259,9 @@ announcements and never stall the line.
   difficulty → class routing with first-pass rate, fare and class-fit votes.
 - **Retrospectives & playbook** — recent retros and each project's playbook by station.
 - **Line announcements** — the event feed.
-- **+ New request** — add work by hand. **Pause line / Resume line** stops and restarts
-  departures (resume also clears an API suspension).
+- **Header** — line status (Supervised / Autopilot / Paused / Suspended), today's spend,
+  the **Autopilot** switch, **+ New request**, **Pause line / Resume line** (resume also
+  clears an API suspension) and ⚙ **Settings**.
 
 ![Train diagram](img/yamanote_diagram.png)
 
@@ -253,8 +289,10 @@ POST also needs the header `X-Yamanote: 1`, which blocks cross-site form posts.
 | `GET /api/stream` | Server-Sent Events: `item`, `event`, `run`, `step` |
 | `GET /metrics` | Prometheus metrics |
 | `POST /api/items` | New request: `{"title", "description", "kind", "priority", "project"}` |
-| `POST /api/items/{id}/approve` · `/reject` · `/cancel` · `/retry` | Gate and train controls (`reject` takes `{"reason"}`) |
+| `POST /api/items/{id}/approve` · `/reject` · `/cancel` · `/retry` | Gate and train controls; `approve` also boards a proposal (`reject` takes `{"reason"}`) |
 | `POST /api/pause` · `/api/resume` · `/api/dispatch` | Line controls |
+| `POST /api/autopilot` | Switch modes: `{"on": true}` (a manual switch; holds until the next scheduled change) |
+| `POST /api/autopilot/settings` | `{"schedule_enabled", "on_cron", "off_cron", "merge_without_tests", "supervised_gates": {"spec", "merge"}}`; invalid cron → 400 with the reason |
 | `POST /api/playbook/delete` | Remove a note: `{"project", "id"}` |
 
 ```bash
@@ -310,8 +348,8 @@ the service user passwordless sudo for exactly that command.
 ```
 
 The Dispatcher picks projects in their schedule window first (hours, inclusive, wraps
-midnight), then unscheduled ones by priority. `gates` overrides the global
-`AGENT_TEAM_GATE_SPEC` / `AGENT_TEAM_GATE_MERGE` per project. `decide_backend` picks
+midnight), then unscheduled ones by priority. `gates` overrides the Supervised
+gates from ⚙ Settings for that project (Autopilot skips gates regardless). `decide_backend` picks
 where Jev-style decisions run for that project: `jev` (hosted, default), `ollama`
 (local `clef-flash`, for confidential code), or `off`. Jev's file ranking sends each
 file's path and first 6,000 characters, not whole files. Playbooks are per project.
@@ -340,6 +378,8 @@ file's path and first 6,000 characters, not whole files. Playbooks are per proje
   machine sleeps), retry-with-backoff for agent failures, and a stall pause after 5
   consecutive rejections for a project. HOLD items return to triage after 24h; a third
   HOLD becomes a REJECT.
+- **Autopilot:** unattended merges require a test command unless you opt out in Settings,
+  and regressions found by the post-deploy watch are reverted automatically.
 - **Merges:** one train per project lands at a time; the merge refuses a dirty or
   wrong-branch main checkout (and retries every 5 minutes), and any conflict marker that
   slips through reverts the merge. Any change after a merge approval — rework, conflict

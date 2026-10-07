@@ -60,6 +60,11 @@ def state(factory) -> dict:
         "routing": routing(factory),
         "playbook": {p["path"]: factory.playbook(p["path"]) for p in factory.projects()},
         "retro_enabled": settings.RETRO_ENABLED,
+        "autopilot": {**factory.autopilot_state(), "config": factory.autopilot_config(),
+                      "preview": factory.schedule_preview(),
+                      "untested": [p["name"] for p in factory.projects()
+                                   if not settings.project_commands(p["path"])["test"]]},
+        "autopilot_report": next((e for e in reversed(store.events(limit=500)) if e["kind"] == "autopilot_report"), None),
         "retros": [{"item_id": r["item_id"], "title": r["title"], "ts": r["ts"], "outcome": r["outcome"],
                     "class_fit": r["class_fit"], "summary": r["data"].get("summary", ""),
                     "added": len(r["data"].get("notes_added") or []), "retired": len(r["data"].get("notes_retired") or [])}
@@ -287,6 +292,13 @@ def make_handler(factory, broadcaster: Broadcaster):
                 if path == "/api/playbook/delete":
                     notes = factory.delete_note(str(body.get("project", "")), int(body.get("id", -1)))
                     return self._json({"ok": True, "playbook": notes})
+                if path == "/api/autopilot":
+                    return self._json({"ok": True, "autopilot": factory.set_autopilot(bool(body.get("on")))})
+                if path == "/api/autopilot/settings":
+                    allowed = {k: body[k] for k in ("schedule_enabled", "on_cron", "off_cron", "merge_without_tests",
+                                                    "supervised_gates") if k in body}
+                    cfg = factory.save_autopilot_config(**allowed)
+                    return self._json({"ok": True, "config": cfg, "preview": factory.schedule_preview()})
                 if path == "/api/dispatch":
                     factory.dispatch_now()
                     return self._json({"ok": True})

@@ -32,6 +32,12 @@ class FactoryTestCase(unittest.TestCase):
     def item(self, item_id):
         return self.store.get_item(item_id)
 
+    def board(self, item):
+        """What a human clicking Board does for work the factory proposed (Supervised mode)."""
+        if item["status"] == "waiting" and item["gate"] == "board":
+            self.factory.approve(item["id"])
+        return self.store.get_item(item["id"])
+
     def kinds(self, item_id):
         return [e["kind"] for e in self.store.events(item_id)]
 
@@ -231,7 +237,7 @@ class TriageTest(FactoryTestCase):
     def test_jev_rejects_obvious_duplicates_without_llm(self):
         self._patch_jev(useful=0.9, ready=0.9, duplicate=0.95, difficulty=1.0)
         f = self.make()
-        item = f.create_item("dup", "Already built", source="dispatcher")
+        item = self.board(f.create_item("dup", "Already built", source="dispatcher"))
         self.assertTrue(run_until(f, lambda: self.item(item["id"])["status"] == "rejected"))
         self.assertNotIn("triage", [r for r, _ in self.client.calls])
         jev_runs = [r for r in self.store.runs(item["id"]) if r["role"] == "jev"]
@@ -240,7 +246,7 @@ class TriageTest(FactoryTestCase):
     def test_jev_fast_pass_skips_llm_triage_and_sets_class(self):
         self._patch_jev(useful=0.95, ready=0.9, duplicate=0.05, difficulty=3.2)
         f = self.make()
-        item = f.create_item("big", "Hard but clear", source="dispatcher")
+        item = self.board(f.create_item("big", "Hard but clear", source="dispatcher"))
         self.assertTrue(run_until(f, lambda: self.item(item["id"])["station"] == "build"
                                   or self.item(item["id"])["status"] == "done"))
         it = self.item(item["id"])
@@ -251,7 +257,7 @@ class TriageTest(FactoryTestCase):
     def test_unsure_jev_defers_to_llm_triage(self):
         self._patch_jev(useful=0.5, ready=0.5, duplicate=0.3, difficulty=2.0)
         f = self.make(triage=lambda m, t: finish("no", {"verdict": "HOLD", "reason": "needs detail"}))
-        item = f.create_item("meh", "Something", source="dispatcher")
+        item = self.board(f.create_item("meh", "Something", source="dispatcher"))
         self.assertTrue(run_until(f, lambda: self.item(item["id"])["status"] == "held"))
         self.assertIn("triage", [r for r, _ in self.client.calls])
         self.assertGreater(self.item(item["id"])["hold_until"], 0)
@@ -266,9 +272,9 @@ class TriageTest(FactoryTestCase):
         decisions.assess_spec = fake
         self.addCleanup(setattr, decisions, "assess_spec", orig)
         f = self.make(triage=lambda m, t: finish("no", {"verdict": "REJECT", "reason": "dup"}))
-        a = f.create_item("first-thing", "x", source="dispatcher")
+        a = self.board(f.create_item("first-thing", "x", source="dispatcher"))
         self.store.update_item(a["id"], station="build", status="waiting", gate="spec")  # parked
-        b = f.create_item("second-thing", "y", source="dispatcher")
+        b = self.board(f.create_item("second-thing", "y", source="dispatcher"))
         self.assertTrue(run_until(f, lambda: self.item(b["id"])["status"] == "rejected"))
         self.assertIn("first-thing", seen[-1])
         self.assertNotIn("second-thing", seen[-1])
@@ -278,8 +284,8 @@ class TriageTest(FactoryTestCase):
         settings.MAX_CONSECUTIVE_REJECTIONS = 2
         self.addCleanup(setattr, settings, "MAX_CONSECUTIVE_REJECTIONS", settings_max)
         f = self.make(triage=lambda m, t: finish("no", {"verdict": "REJECT", "reason": "nope"}))
-        a = f.create_item("a", "x", source="dispatcher")
-        b = f.create_item("b", "y", source="dispatcher")
+        a = self.board(f.create_item("a", "x", source="dispatcher"))
+        b = self.board(f.create_item("b", "y", source="dispatcher"))
         self.assertTrue(run_until(f, lambda: self.item(a["id"])["status"] == "rejected"
                                   and self.item(b["id"])["status"] == "rejected"))
         self.assertIsNone(f.pick_project())

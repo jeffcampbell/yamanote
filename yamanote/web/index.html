@@ -24,12 +24,17 @@
     <span id="clock" class="clock"></span>
   </div>
   <div class="topbar-actions">
-    <button id="btn-new" class="btn btn-primary">+ New request</button>
+    <button id="btn-autopilot" class="btn autopilot-switch" role="switch" aria-checked="false" title="Autopilot: run the line without human gates">
+      <span class="sw" aria-hidden="true"></span><span>Autopilot</span>
+    </button>
+    <button id="btn-new" class="btn btn-primary"><span class="lbl-long">+ New request</span><span class="lbl-short">+ New</span></button>
     <button id="btn-pause" class="btn">Pause line</button>
+    <button id="btn-settings" class="btn btn-icon" aria-label="Settings" title="Settings">⚙</button>
   </div>
 </header>
 <div id="conn-lost" class="conn-lost" hidden>Connection to the orchestrator lost — retrying…</div>
 <div id="suspended-banner" class="banner banner-warn" hidden></div>
+<div id="away-banner" class="banner banner-away" hidden></div>
 
 <main>
   <section class="loop-card card">
@@ -151,6 +156,56 @@
     <div class="dialog-actions">
       <button type="button" class="btn" id="new-cancel">Cancel</button>
       <button type="submit" class="btn btn-primary">Dispatch</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settings-dialog">
+  <form id="settings-form" method="dialog">
+    <h3>Settings</h3>
+
+    <section class="set-section">
+      <h4>Autopilot <span class="muted small">自動運転</span></h4>
+      <p class="small muted">Autopilot runs the line <b>dark</b>: approval gates are skipped, work the Dispatcher and
+        Signal propose boards itself, and post-deploy regressions are reverted automatically. Supervised mode applies
+        the gates below and holds proposals at Intake until you board them.</p>
+      <p id="set-mode" class="set-mode"></p>
+    </section>
+
+    <section class="set-section">
+      <h4>Schedule</h4>
+      <label class="check"><input type="checkbox" name="schedule_enabled"> Switch automatically on a schedule</label>
+      <div class="form-row">
+        <label>Autopilot on (cron) <input name="on_cron" placeholder="0 22 * * *" autocomplete="off" spellcheck="false"></label>
+        <label>Autopilot off (cron) <input name="off_cron" placeholder="0 7 * * 1-5" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <div class="presets small">Presets:
+        <button type="button" class="chip" data-preset="0 22 * * *|0 7 * * *">Nights 22:00–07:00</button>
+        <button type="button" class="chip" data-preset="0 19 * * 1-5|0 8 * * 1-5">Weeknights 19:00–08:00</button>
+        <button type="button" class="chip" data-preset="0 18 * * 5|0 8 * * 1">Weekends Fri 18:00–Mon 08:00</button>
+      </div>
+      <p class="small muted">Five fields, local time: minute hour day-of-month month day-of-week (e.g. <code>30 7 * * mon-fri</code>).
+        A manual switch holds until the next scheduled change.</p>
+      <p id="set-preview" class="small set-preview"></p>
+    </section>
+
+    <section class="set-section">
+      <h4>Autopilot rules</h4>
+      <label class="check"><input type="checkbox" name="merge_without_tests"> Merge projects that have no test command</label>
+      <p id="set-untested" class="small muted"></p>
+    </section>
+
+    <section class="set-section">
+      <h4>Supervised gates</h4>
+      <label class="check"><input type="checkbox" name="gate_spec"> Approve each spec before Build</label>
+      <label class="check"><input type="checkbox" name="gate_merge"> Approve each merge to trunk</label>
+      <p class="small muted">Per-project <code>gates</code> in projects.json take precedence.</p>
+    </section>
+
+    <p id="settings-error" class="error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="settings-cancel">Close</button>
+      <button type="submit" class="btn btn-primary">Save</button>
     </div>
   </form>
 </dialog>

@@ -19,11 +19,12 @@ import re
 import shlex
 import subprocess
 import threading
+import datetime as dt
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
 
-from . import decisions, gitops, notify, prompts, settings
+from . import cron, decisions, gitops, notify, prompts, settings
 from .agent import READ_TOOLS, RUN_TOOLS, WRITE_TOOLS, Agent, AgentResult, single_shot
 from .checks import CheckResult, run_check
 from .llm import UNREACHABLE, Client
@@ -233,6 +234,7 @@ class Factory:
 
     def tick(self):
         self._detect_sleep()
+        self._autopilot_tick()
         self._harvest()
         self._watch_logs()
         if self.paused:
@@ -632,7 +634,7 @@ class Factory:
         self.store.event(item["id"], "spec", "specified",
                          f"{len(spec['acceptance_criteria'])} acceptance criteria, "
                          f"{len(scenarios)} holdout scenarios sealed")
-        if settings.project_gates(project)["spec"]:
+        if self.gates(project)["spec"]:
             return self._wait_at_gate(item, "spec", "Signal at red — waiting for human spec approval")
         self._move(item, "build", "Spec ready; waiting for a train")
 
@@ -831,7 +833,7 @@ class Factory:
         trunk, re-run the tests on the combination, then land it. Two trains
         that each pass alone can't break trunk together."""
         project = item["project"]
-        if settings.project_gates(project)["merge"] and item.get("gate") != "approved":
+        if self.gates(project)["merge"] and item.get("gate") != "approved":
             return self._wait_at_gate(item, "merge", "Signal at red — waiting for human merge approval")
         lock = self._merge_lock(project)
         if not lock.acquire(blocking=False):
@@ -955,7 +957,7 @@ class Factory:
         self._notify("regression", f"Yamanote: regression after #{origin}",
                      f"{watch.get('title')}: new errors after deploy; filed #{bug['id']}", origin_item,
                      {"lines": fresh[:10], "bug_id": bug["id"]})
-        if settings.AUTO_REVERT and watch.get("commit"):
+        if (settings.AUTO_REVERT or self.autopilot_on) and watch.get("commit"):
             self._submit(f"revert:{project}", self._revert_job, project, origin, watch["commit"])
         return True
 
@@ -1069,6 +1071,178 @@ class Factory:
             self.store.event(None, None, "gc", f"Retention ({settings.LOG_RETENTION_DAYS}d): pruned {removed['steps']} "
                              f"steps, {removed['events']} events, {branches} old branches")
 
+    # ─── Autopilot (dark mode) ──────────────────────────────────────────
+
+    def autopilot_config(self) -> dict:
+        """Settings-panel values; seeded from the environment until first saved."""
+        cfg = self.store.kv_get("autopilot_config")
+        if cfg is None:
+            cfg = {"schedule_enabled": bool(settings.AUTOPILOT_ON_CRON or settings.AUTOPILOT_OFF_CRON),
+                   "on_cron": settings.AUTOPILOT_ON_CRON, "off_cron": settings.AUTOPILOT_OFF_CRON,
+                   "merge_without_tests": settings.AUTOPILOT_MERGE_WITHOUT_TESTS,
+                   "supervised_gates": {"spec": settings.GATE_SPEC, "merge": settings.GATE_MERGE}}
+        return cfg
+
+    def save_autopilot_config(self, **changes) -> dict:
+        cfg = dict(self.autopilot_config())
+        for key in ("on_cron", "off_cron"):
+            if key in changes:
+                expr = str(changes[key] or "").strip()
+                if expr:
+                    cron.parse(expr)  # raises CronError (a ValueError) with a readable message
+                cfg[key] = expr
+        for key in ("schedule_enabled", "merge_without_tests"):
+            if key in changes:
+                cfg[key] = bool(changes[key])
+        if "supervised_gates" in changes:
+            gates = changes["supervised_gates"] or {}
+            cfg["supervised_gates"] = {k: bool(gates.get(k, cfg["supervised_gates"].get(k, False)))
+                                       for k in ("spec", "merge")}
+        if cfg["schedule_enabled"] and not (cfg["on_cron"] and cfg["off_cron"]):
+            raise ValueError("a schedule needs both an 'on' and an 'off' time")
+        self.store.kv_set("autopilot_config", cfg)
+        if any(k in changes for k in ("schedule_enabled", "on_cron", "off_cron")):
+            # A new schedule takes effect now: the line switches to whatever it says for this moment.
+            self.store.kv_set("autopilot_applied", 0)
+        self.store.event(None, None, "notice", "Autopilot settings updated")
+        return cfg
+
+    def autopilot_state(self) -> dict:
+        st = self.store.kv_get("autopilot")
+        if st is None:
+            st = {"on": settings.AUTOPILOT, "since": time.time(), "source": "default"}
+            self.store.kv_set("autopilot", st)
+        return st
+
+    @property
+    def autopilot_on(self) -> bool:
+        return bool(self.autopilot_state()["on"])
+
+    def gates(self, project: str) -> dict:
+        """Which human gates apply to this project right now."""
+        cfg = self.autopilot_config()
+        gates = dict(cfg.get("supervised_gates") or {"spec": False, "merge": False})
+        gates.update({k: bool(v) for k, v in (settings.project_config(project).get("gates") or {}).items()
+                      if k in gates})
+        if self.autopilot_on:
+            untested = not settings.project_commands(project)["test"]
+            gates = {"spec": False, "merge": untested and not cfg.get("merge_without_tests")}
+        return gates
+
+    def schedule_preview(self) -> dict:
+        cfg = self.autopilot_config()
+        now = dt.datetime.now()
+        out = {"next_on": None, "next_off": None, "error": None}
+        try:
+            if cfg.get("on_cron"):
+                n = cron.parse(cfg["on_cron"]).next(now)
+                out["next_on"] = n.timestamp() if n else None
+            if cfg.get("off_cron"):
+                n = cron.parse(cfg["off_cron"]).next(now)
+                out["next_off"] = n.timestamp() if n else None
+        except cron.CronError as e:
+            out["error"] = str(e)
+        return out
+
+    def set_autopilot(self, on: bool, source: str = "manual", now: float | None = None) -> dict:
+        state = self.autopilot_state()
+        now = now or time.time()
+        if source == "manual":
+            # Like a thermostat: a manual switch holds until the next scheduled change.
+            self.store.kv_set("autopilot_applied", now)
+        if bool(state["on"]) == bool(on):
+            return state
+        new = {"on": bool(on), "since": now, "source": source}
+        self.store.kv_set("autopilot", new)
+        who = "by schedule" if source == "schedule" else "by human"
+        if on:
+            self.store.event(None, None, "autopilot", f"Autopilot ON {who} — running dark: gates skipped, "
+                             "proposals board themselves, regressions auto-revert")
+            self._notify("autopilot", "Yamanote: autopilot on", f"Switched on {who}; the line is running dark.")
+            self._release_gates()
+        else:
+            report = self._autopilot_report(state.get("since") or now, now)
+            self.store.event(None, None, "autopilot", f"Autopilot OFF {who} — supervised again")
+            self.store.event(None, None, "autopilot_report", report["message"], report)
+            self._notify("autopilot", "Yamanote: while you were away", report["message"], data=report)
+        return new
+
+    def _autopilot_tick(self, now: float | None = None):
+        """Apply the schedule, at most once a minute. Only scheduled times later
+        than the last applied change (or manual switch) take effect."""
+        if now is None:
+            now = time.time()
+            if now - getattr(self, "_autopilot_checked", 0) < 60:
+                return
+            self._autopilot_checked = now
+        cfg = self.autopilot_config()
+        if not (cfg.get("schedule_enabled") and cfg.get("on_cron") and cfg.get("off_cron")):
+            return
+        try:
+            moment = dt.datetime.fromtimestamp(now)
+            last_on = cron.parse(cfg["on_cron"]).prev(moment)
+            last_off = cron.parse(cfg["off_cron"]).prev(moment)
+        except cron.CronError as e:
+            self._notice("autopilot-cron", f"Autopilot schedule is invalid: {e}")
+            return
+        events = [(t.timestamp(), on) for t, on in ((last_on, True), (last_off, False)) if t]
+        if not events:
+            return
+        latest_ts, want_on = max(events)
+        if latest_ts <= (self.store.kv_get("autopilot_applied", 0) or 0):
+            return
+        self.store.kv_set("autopilot_applied", latest_ts)
+        self.set_autopilot(want_on, source="schedule", now=now)
+
+    def _release_gates(self):
+        """Autopilot starts: let waiting trains through under autopilot rules."""
+        for item in self.store.items(("waiting",)):
+            gate = item.get("gate")
+            if gate == "board":
+                fields, station, msg = {"station": "triage", "gate": None}, "triage", "Boarded by autopilot"
+            elif gate == "spec":
+                fields, station, msg = {"station": "build", "gate": None}, "build", "Spec gate released by autopilot"
+            elif gate == "merge" and not self.gates(item["project"])["merge"]:
+                fields, station, msg = {"gate": "approved"}, "merge", "Merge gate released by autopilot"
+            else:
+                if gate == "merge":
+                    self.store.event(item["id"], "merge", "notice",
+                                     "Still waiting under autopilot: this project has no test command "
+                                     "(enable 'Merge without tests' to let it through)")
+                continue
+            if self.store.transition(item["id"], ("waiting",), status="queued", **fields):
+                self.store.event(item["id"], station, "approved", msg)
+
+    def _autopilot_report(self, start: float, end: float) -> dict:
+        """'While you were away': what the line did during an autopilot window."""
+        items = [i for i in self.store.items(limit=2000)
+                 if (i.get("finished_at") or 0) >= start or i["created_at"] >= start]
+        arrived = [i for i in items if i["status"] == "done" and (i.get("finished_at") or 0) >= start]
+        failed = [i for i in items if i["status"] == "failed" and (i.get("finished_at") or 0) >= start]
+        rejected = [i for i in items if i["status"] == "rejected" and (i.get("finished_at") or 0) >= start]
+        waiting = [i for i in self.store.items(("waiting",))]
+        events = [e for e in self.store.events(limit=2000) if e["ts"] >= start]
+        regressions = sum(1 for e in events if e["kind"] == "regression")
+        reverts = sum(1 for e in events if e["kind"] == "reverted")
+        notes = sum(1 for e in events if e["kind"] == "playbook" and e["message"].startswith("New "))
+        spend = self.store.spend_since(start)
+        hours = (end - start) / 3600
+        parts = [f"{len(arrived)} arrived", f"{len(failed)} failed"]
+        if rejected:
+            parts.append(f"{len(rejected)} not in service")
+        if regressions:
+            parts.append(f"{regressions} regression{'s' if regressions > 1 else ''}"
+                         + (f" ({reverts} reverted)" if reverts else ""))
+        if notes:
+            parts.append(f"{notes} new playbook note{'s' if notes > 1 else ''}")
+        message = (f"Autopilot ran {hours:.1f}h: " + ", ".join(parts) + f"; spent ${spend:.2f}."
+                   + (f" {len(waiting)} train(s) now waiting for you." if waiting else ""))
+        return {"message": message, "start": start, "end": end, "spend": spend,
+                "arrived": [{"id": i["id"], "title": i["title"]} for i in arrived],
+                "failed": [{"id": i["id"], "title": i["title"], "outcome": (i.get("outcome") or "")[:200]} for i in failed],
+                "rejected": len(rejected), "regressions": regressions, "reverts": reverts, "notes": notes,
+                "waiting": [{"id": i["id"], "title": i["title"], "gate": i.get("gate")} for i in waiting]}
+
     # ─── human actions (from the dashboard) ─────────────────────────────
 
     def create_item(self, title: str, description: str, project: str | None = None, *, kind: str = "feature",
@@ -1078,14 +1252,27 @@ class Factory:
         if problem:
             raise ValueError(problem)
         title = re.sub(r"\s+", "-", title.strip().lower())[:80] or "untitled"
-        return self.store.create_item(title=title, project=project, description=description.strip(), kind=kind,
+        item = self.store.create_item(title=title, project=project, description=description.strip(), kind=kind,
                                       source=source, priority=priority if priority in PRIORITY_ORDER else "medium")
+        if source in ("dispatcher", "signal") and not self.autopilot_on:
+            # Supervised: work the factory proposed itself waits at Intake for a human to board it.
+            held = self.store.transition(item["id"], ("queued",), station="intake", status="waiting", gate="board")
+            if held:
+                self.store.event(item["id"], "intake", "gate",
+                                 f"Proposed by {source} — waiting for a human to board it (Autopilot would board it)")
+                self._notify("gate", f"Yamanote: #{item['id']} proposed by {source}", f"{held['title']} — board it?", held)
+                item = held
+        return item
 
     def approve(self, item_id: int) -> dict:
         item = self.store.get_item(item_id)
         if not item or item["status"] != "waiting":
             raise ValueError("item is not waiting at a gate")
-        if item["gate"] == "spec":
+        if item["gate"] == "board":
+            if not self.store.transition(item_id, ("waiting",), status="queued", station="triage", gate=None):
+                raise ValueError("item is no longer waiting")
+            self.store.event(item_id, "triage", "approved", "Boarded by human")
+        elif item["gate"] == "spec":
             if not self.store.transition(item_id, ("waiting",), status="queued", station="build", gate=None):
                 raise ValueError("item is no longer waiting")
             self.store.event(item_id, "build", "approved", "Spec approved by human — waiting for a train")
@@ -1100,8 +1287,9 @@ class Factory:
         if not item or item["status"] != "waiting":
             raise ValueError("item is not waiting at a gate")
         try:
-            self._finish(item, "rejected", f"Rejected by human at {item['gate']} gate" + (f": {reason}" if reason else ""),
-                         expect=("waiting",))
+            label = "Declined by human (not boarded)" if item["gate"] == "board" else \
+                f"Rejected by human at {item['gate']} gate"
+            self._finish(item, "rejected", label + (f": {reason}" if reason else ""), expect=("waiting",))
         except ItemGone:
             raise ValueError("item is no longer waiting") from None
         return self.store.get_item(item_id)

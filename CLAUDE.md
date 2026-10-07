@@ -12,6 +12,7 @@ decisions. User-facing docs: `README.md`; guided install for agents: `SETUP.md`.
 | `factory.py` | Tick loop; one `_station_<name>` method per station; retrospectives and playbooks; Signal, Dispatcher, Ops |
 | `agent.py` | Tool-calling loop over OpenRouter; sandboxed file tools; `run` tool (temp-file output, process-group cleanup) |
 | `llm.py` | OpenRouter client: exact cost from `usage.cost`, fallbacks, Anthropic cache breakpoints |
+| `cron.py` | Five-field cron parser (`prev`/`next`) for the autopilot schedule |
 | `store.py` | SQLite: items, events, runs, steps, retros, kv. `Store.transition()` is compare-and-set — use it for status changes from jobs |
 | `prompts.py` | Station system prompts + JSON result schemas |
 | `decisions.py` | Jev questions (difficulty, triage screen, file relevance, log screen); every call returns None when decide is unavailable |
@@ -24,6 +25,8 @@ decisions. User-facing docs: `README.md`; guided install for agents: `SETUP.md`.
   (arrived/failed → JY09 Retro) or `_finish` (terminal) so cancels and the SLA reaper
   can't be overwritten. Raise `ItemGone` when a transition loses the race.
 - Every model call is recorded as a run with steps; spend must flow through `Store.add_step`.
+- Ask `factory.gates(project)` which human gates apply — never read `settings` gates
+  directly — so Autopilot, the Settings panel and projects.json all stay in charge.
 - Never weaken the guardrails in README "Guardrails" without the user asking.
 - UI changes: check phone (390px), tablet (768px) and laptop (1280px) widths; headless
   Chrome can't go below 500px, so load the page in an iframe of the target width.
