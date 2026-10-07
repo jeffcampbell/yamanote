@@ -14,7 +14,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import decisions, settings
+from . import decisions, settings, stats
 from .metrics import METRICS, render_prometheus
 from .store import ACTIVE_STATUSES, STATIONS, public_item
 
@@ -60,6 +60,7 @@ def state(factory) -> dict:
         "routing": routing(factory),
         "playbook": {p["path"]: factory.playbook(p["path"]) for p in factory.projects()},
         "retro_enabled": settings.RETRO_ENABLED,
+        "telemetry": factory.telemetry.status() if getattr(factory, "telemetry", None) else {"enabled": False},
         "autopilot": {**factory.autopilot_state(), "config": factory.autopilot_config(),
                       "preview": factory.schedule_preview(),
                       "untested": [p["name"] for p in factory.projects()
@@ -213,6 +214,14 @@ def make_handler(factory, broadcaster: Broadcaster):
                 if path == "/api/events":
                     after = int((qs.get("after") or ["0"])[0])
                     return self._json({"events": factory.store.events(limit=200, after_id=after)})
+                if path == "/api/stats":
+                    try:
+                        days = float((qs.get("days") or ["7"])[0])
+                    except ValueError:
+                        days = 7.0
+                    days = max(1 / 24, min(365.0, days))
+                    project = (qs.get("project") or [""])[0] or None
+                    return self._json(stats.compute(factory.store, days, project))
                 if path == "/api/diagram":
                     hours = max(1, min(168, int((qs.get("hours") or ["12"])[0])))
                     since = time.time() - hours * 3600

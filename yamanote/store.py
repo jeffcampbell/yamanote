@@ -456,6 +456,21 @@ class Store:
                          cls=it.get("first_class") or it.get("service_class"), station=it.get("station"))
         return list(by_item.values())
 
+    def events_since(self, since: float, project: str | None = None, kinds: tuple[str, ...] | None = None) -> list[dict]:
+        """Events at or after `since`, optionally for one project's items and of given kinds."""
+        sql, params = "SELECT e.* FROM events e", []
+        if project:
+            sql += " JOIN items i ON i.id = e.item_id"
+        sql += " WHERE e.ts >= ?"
+        params.append(since)
+        if project:
+            sql += " AND i.project = ?"
+            params.append(project)
+        if kinds:
+            sql += f" AND e.kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        return self._all(sql + " ORDER BY e.id", tuple(params))
+
     def kv_delete_prefix(self, prefix: str) -> None:
         self._exec("DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'",
                    (prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",))

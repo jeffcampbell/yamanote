@@ -35,8 +35,12 @@
 <div id="conn-lost" class="conn-lost" hidden>Connection to the orchestrator lost — retrying…</div>
 <div id="suspended-banner" class="banner banner-warn" hidden></div>
 <div id="away-banner" class="banner banner-away" hidden></div>
+<nav class="views" aria-label="Views">
+  <a href="#" class="view-tab active" data-view="line">Line <span class="muted">路線図</span></a>
+  <a href="#stats" class="view-tab" data-view="stats">Stats <span class="muted">統計</span></a>
+</nav>
 
-<main>
+<main id="line-view">
   <section class="loop-card card">
     <div class="loop-wrap">
       <svg id="loop" viewBox="0 0 1000 400" role="img" aria-label="Line map: work items as trains travelling between stations">
@@ -128,6 +132,29 @@
       <ol id="feed"></ol>
     </div>
   </section>
+</main>
+
+<main id="stats-view" class="viz" hidden>
+  <div class="stats-filters" role="group" aria-label="Filters">
+    <div class="board-tabs light" role="tablist" aria-label="Time range">
+      <button class="tab" data-days="1">24h</button>
+      <button class="tab active" data-days="7">7 days</button>
+      <button class="tab" data-days="30">30 days</button>
+      <button class="tab" data-days="90">90 days</button>
+    </div>
+    <select id="stats-project" aria-label="Project"><option value="">All projects</option></select>
+    <span id="stats-otel" class="small muted"></span>
+  </div>
+  <section class="kpis stat-tiles" id="stats-kpis"></section>
+  <section class="charts-grid">
+    <div class="card chart-card" id="chart-spend"></div>
+    <div class="card chart-card" id="chart-trains"></div>
+    <div class="card chart-card" id="chart-stations"></div>
+    <div class="card chart-card" id="chart-quality"></div>
+    <div class="card chart-card" id="chart-merges"></div>
+    <div class="card chart-card" id="chart-efficiency"></div>
+  </section>
+  <section class="card" id="stats-models"></section>
 </main>
 
 <aside id="drawer" class="drawer" aria-hidden="true">
