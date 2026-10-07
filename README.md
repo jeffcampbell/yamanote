@@ -172,8 +172,8 @@ conflicts, the model class — and the project's current **playbook**, then reco
 Notes are measured: each counts the trains that ran with it and how many arrived
 without rework. A note used by 8+ trains with under 30% first-pass success is retired
 automatically, and each station keeps at most 6 (the weakest makes room). The
-dashboard's **Retrospectives & playbook** card shows recent retros and every note with
-its record; remove any note with ×.
+dashboard's **Retro 振り返り** tab (or `/#retro`) shows every retrospective's write-up
+and each project's playbook with each note's record; remove any note with ×.
 
 A retrospective usually costs well under a cent. If the model returns an empty or
 template answer it retries once a class up (a few cents). It runs even for a train that
@@ -258,9 +258,11 @@ announcements and never stall the line.
   post-deploy watch, notification status, latest ops report.
 - **Service classes & routing** — model per class with 24h spend and cache-hit rate,
   difficulty → class routing with first-pass rate, fare and class-fit votes.
-- **Retrospectives & playbook** — recent retros and each project's playbook by station.
 - **Line announcements** — the event feed.
 - **Stats 統計** — a second view with history; see [Stats & observability](#stats--observability).
+- **Retro 振り返り** — a third view (`/#retro`): each retrospective over 7 / 30 / 90 days
+  (summary, root cause, what went well and wrong, class fit, notes added and retired),
+  totals for the range, and each project's playbook by station.
 - **Header** — line status (Supervised / Autopilot / Paused / Suspended), today's spend,
   the **Autopilot** switch, **+ New request**, **Pause line / Resume line** (resume also
   clears an API suspension) and ⚙ **Settings**.
@@ -301,7 +303,7 @@ hidden (the budget is line-wide). Lines and commits merged are recorded at merge
 trains merged before that are found in git by the `Yamanote item #N` line in their merge
 commit and cached on first view.
 
-<!-- screenshot: img/yamanote_stats.png — the Stats view over 7 days (open /#stats), ~1280px wide -->
+![The Stats view over 24 hours: KPI tiles against the previous period and spend per hour](img/yamanote_stats.png)
 
 ### OpenTelemetry export
 
@@ -382,12 +384,13 @@ POST also needs the header `X-Yamanote: 1`, which blocks cross-site form posts.
 
 | Method & path | |
 |---|---|
-| `GET /api/state` | Everything the dashboard shows: trains, items, arrivals, stats, routing, playbooks, retros |
+| `GET /api/state` | Everything the dashboard shows: trains, items, arrivals, stats, routing, playbooks |
 | `GET /api/items/{id}` | One train: item (with scenarios), events, runs, retro |
 | `GET /api/runs/{id}/steps?after=N` | An agent run's steps (model turns, tool calls) |
 | `GET /api/events?after=N` | Line-wide event feed |
 | `GET /api/diagram?hours=12` | Station × time points for the train diagram |
 | `GET /api/stats?days=7&project=…` | Everything the Stats view shows: KPIs vs the previous period, per-hour/day series, station times, models |
+| `GET /api/retros?days=30&project=…&limit=50` | Full retrospectives, newest first, with totals for the range |
 | `GET /api/stream` | Server-Sent Events: `item`, `event`, `run`, `step` |
 | `GET /metrics` | Prometheus metrics |
 | `POST /api/items` | New request: `{"title", "description", "kind", "priority", "project"}` |

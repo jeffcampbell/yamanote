@@ -428,9 +428,11 @@ class Store:
             row["data"] = json.loads(row["data"])
         return row
 
-    def recent_retros(self, limit: int = 20) -> list[dict]:
-        rows = self._all("SELECT r.*, i.title FROM retros r LEFT JOIN items i ON i.id = r.item_id"
-                         " ORDER BY r.ts DESC LIMIT ?", (limit,))
+    def recent_retros(self, limit: int = 20, project: str | None = None, since: float = 0) -> list[dict]:
+        rows = self._all("SELECT r.*, i.title, i.project, i.kind, i.attempt, i.cost_usd, i.first_class, i.service_class"
+                         " FROM retros r LEFT JOIN items i ON i.id = r.item_id WHERE r.ts >= ?"
+                         + (" AND i.project = ?" if project else "") + " ORDER BY r.ts DESC LIMIT ?",
+                         (since, *([project] if project else []), limit))
         for r in rows:
             r["data"] = json.loads(r["data"])
         return rows

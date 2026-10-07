@@ -379,30 +379,69 @@ function renderRouting() {
 /* ── retrospectives & playbook ───────────────────────── */
 const FIT = { underpowered: ["fit-under", "class too weak"], overpowered: ["fit-over", "class overkill"] };
 function renderLearning() {
-  if (!S.retro_enabled) {
-    $("#learning").innerHTML = `<p class="empty">Retrospectives are off (AGENT_TEAM_RETRO=0).</p>`;
-    return;
+  if (!S) return;
+  const list = $("#retro-list");
+  if (!S.retro_enabled) list.innerHTML = `<p class="empty">Retrospectives are off (AGENT_TEAM_RETRO=0).</p>`;
+  else if (!retroData) list.innerHTML = `<p class="empty">Loading…</p>`;
+  else list.innerHTML = retroData.retros.length ? retroData.retros.map(retroEntry).join("")
+    : `<p class="empty">No retrospectives in this range. Every train ends its journey at JY09 Retro.</p>`;
+  if (retroData) {
+    const sm = retroData.summary;
+    $("#retro-kpis").innerHTML = [
+      tile("Retrospectives", String(sm.count), `<div class="kpi-note">${sm.arrived} arrived · ${sm.failed} failed</div>`),
+      tile("Class about right", sm.count ? Math.round(100 * sm.class_fit.right / sm.count) + "%" : "—",
+        `<div class="kpi-note">${sm.class_fit.underpowered} too weak · ${sm.class_fit.overpowered} overkill</div>`),
+      tile("Notes added", String(sm.notes_added), `<div class="kpi-note">${sm.notes_retired} retired</div>`),
+    ].join("");
   }
-  let html = S.retros.length ? S.retros.map((r) => {
-    const [cls, label] = r.outcome === "done" ? ["badge-on", "ARRIVED"] : ["badge-warn", "FAILED"];
-    const fit = FIT[r.class_fit];
-    const delta = [r.added ? `+${r.added} note${r.added > 1 ? "s" : ""}` : "", r.retired ? `−${r.retired} retired` : ""].filter(Boolean).join(" · ");
-    return `<div class="retro-row" data-train="${r.item_id}"><span class="badge ${cls}">${label}</span>
-      <span class="retro-title">#${r.item_id} ${esc(r.title || "")}</span>
-      <span class="retro-sum">${esc(r.summary || "(no summary)")}${fit ? ` <span class="${fit[0]}">· ${fit[1]}</span>` : ""}${delta ? ` · <b>${delta}</b>` : ""}</span></div>`;
-  }).join("") : `<p class="empty">Every train ends its journey at JY09 Retro. Retrospectives will appear here.</p>`;
-  for (const p of S.projects) {
+  let html = "";
+  const projects = S.projects.filter((p) => !retroProject || p.path === retroProject);
+  for (const p of projects) {
     const notes = S.playbook[p.path] || [];
-    html += `<h3 style="margin-top:14px">${esc(p.name)} playbook <span class="badge">${notes.length}</span></h3>`;
+    html += `<h4 class="pb-project">${esc(p.name)} <span class="badge">${notes.length}</span></h4>`;
     if (!notes.length) { html += `<p class="empty">No notes yet. Retrospectives add them when a train hits a problem the next one could avoid.</p>`; continue; }
     const by = {};
     for (const n of notes) (by[n.station] ||= []).push(n);
-    for (const [station, list] of Object.entries(by)) {
-      html += `<div class="pb-station">${esc(S.stations.find((x) => x.key === station)?.code || "")} ${esc(station)}</div>`;
-      html += list.map((n) => `<div class="lesson"><span>${esc(n.text)} <span class="note-stats">${n.uses ? `${n.wins}/${n.uses} first-pass` : "unused yet"} · <a class="muted" data-id="${n.item_id}">#${n.item_id}</a></span></span><button title="Remove this note" data-note="${n.id}" data-project="${esc(p.path)}">×</button></div>`).join("");
+    for (const [st, items] of Object.entries(by)) {
+      html += `<div class="pb-station">${esc(S.stations.find((x) => x.key === st)?.code || "")} ${esc(st)}</div>`;
+      html += items.map((n) => `<div class="lesson"><span>${esc(n.text)} <span class="note-stats">${n.uses ? `${n.wins}/${n.uses} first-pass` : "unused yet"} · <a class="muted" data-id="${n.item_id}">#${n.item_id}</a></span></span><button title="Remove this note" data-note="${n.id}" data-project="${esc(p.path)}">×</button></div>`).join("");
     }
   }
-  $("#learning").innerHTML = html;
+  $("#learning").innerHTML = html || `<p class="empty">No projects.</p>`;
+}
+
+function retroEntry(r) {
+  const d = r.data || {};
+  const [cls, label] = r.outcome === "done" ? ["badge-on", "ARRIVED"] : ["badge-warn", "FAILED"];
+  const fit = FIT[r.class_fit];
+  const ul = (title, items) => items && items.length ? `<h5>${title}</h5><ul>${items.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "";
+  const added = d.notes_added || [], retired = d.notes_retired || [];
+  const more = ul("Went well", d.went_well) + ul("Went wrong", d.went_wrong)
+    + ul("Playbook notes added", added.map((n) => `[${n.station}] ${n.text}`))
+    + ul("Playbook notes retired", retired.map((n) => `[${n.station}] ${n.text} — ${n.why}`));
+  const delta = [added.length ? `+${added.length} note${added.length > 1 ? "s" : ""}` : "", retired.length ? `−${retired.length} retired` : ""].filter(Boolean).join(" · ");
+  const project = S.projects.find((p) => p.path === r.project)?.name;
+  return `<div class="retro-entry">
+    <div class="r-head"><span class="badge ${cls}">${label}</span>${svcBadge(r.first_class || r.service_class)}<span class="r-title" data-train="${r.item_id}">#${r.item_id} ${esc(r.title || "")}</span></div>
+    <div class="r-meta">${esc(ago(r.ts))} ago${project && !retroProject ? ` · ${esc(project)}` : ""}${r.attempt > 1 ? ` · ${r.attempt} attempts` : ""}${r.cost_usd ? ` · $${r.cost_usd.toFixed(2)}` : ""}${fit ? ` · <span class="${fit[0]}">${fit[1]}</span>` : ""}${delta ? ` · <b>${delta}</b>` : ""}</div>
+    <p>${esc(d.summary || d.error || "(no summary)")}</p>
+    ${d.root_cause ? `<p class="r-cause"><b>Root cause:</b> ${esc(d.root_cause)}</p>` : ""}
+    ${more ? `<details><summary>Details</summary>${more}</details>` : ""}
+  </div>`;
+}
+
+let retroDays = 30, retroProject = "", retroData = null, retroTimer = null;
+async function loadRetros() {
+  try {
+    retroData = await api(`/api/retros?days=${retroDays}${retroProject ? "&project=" + encodeURIComponent(retroProject) : ""}`);
+  } catch (e) {
+    if (!retroData) $("#retro-list").innerHTML = `<p class="empty">Couldn't load retrospectives: ${esc(e.message || e)}</p>`;
+    return;
+  }
+  const sel = $("#retro-project"), cur = sel.value;
+  sel.innerHTML = `<option value="">All projects</option>` + (S?.projects || []).map((pr) => `<option value="${esc(pr.path)}">${esc(pr.name)}</option>`).join("");
+  sel.value = cur;
+  renderLearning();
 }
 
 /* ── train diagram (ダイヤ) ──────────────────────────── */
@@ -755,11 +794,15 @@ function wire() {
   $("#drawer-close").addEventListener("click", closeDrawer);
   $("#scrim").addEventListener("click", closeDrawer);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openId) closeDrawer(); });
-  $$(".view-tab").forEach((t) => t.addEventListener("click", (e) => { e.preventDefault(); history.replaceState(null, "", t.dataset.view === "stats" ? "#stats" : location.pathname); setView(t.dataset.view); }));
+  $$(".view-tab").forEach((t) => t.addEventListener("click", (e) => { e.preventDefault(); history.replaceState(null, "", t.dataset.view === "line" ? location.pathname : "#" + t.dataset.view); setView(t.dataset.view); }));
   $$("[data-days]").forEach((b) => b.addEventListener("click", () => {
     statsDays = Number(b.dataset.days); $$("[data-days]").forEach((x) => x.classList.toggle("active", x === b)); loadStats();
   }));
   $("#stats-project").addEventListener("change", (e) => { statsProject = e.target.value; loadStats(); });
+  $$("[data-rdays]").forEach((b) => b.addEventListener("click", () => {
+    retroDays = Number(b.dataset.rdays); $$("[data-rdays]").forEach((x) => x.classList.toggle("active", x === b)); loadRetros();
+  }));
+  $("#retro-project").addEventListener("change", (e) => { retroProject = e.target.value; loadRetros(); });
   document.addEventListener("click", (e) => {
     const t = e.target.closest("[data-table]");
     if (!t) return;
@@ -874,7 +917,7 @@ async function boot() {
   const m = location.hash.match(/^#item-(\d+)$/);
   if (m) openItem(Number(m[1]));
   if (location.hash === "#settings") openSettings();
-  if (location.hash === "#stats") setView("stats");
+  if (location.hash === "#stats" || location.hash === "#retro") setView(location.hash.slice(1));
 }
 boot();
 
@@ -891,9 +934,12 @@ function setView(v) {
   view = v;
   $("#line-view").hidden = v !== "line";
   $("#stats-view").hidden = v !== "stats";
+  $("#retro-view").hidden = v !== "retro";
   $$(".view-tab").forEach((t) => t.classList.toggle("active", t.dataset.view === v));
   if (v === "stats") { loadStats(); clearInterval(statsTimer); statsTimer = setInterval(loadStats, 60000); }
   else clearInterval(statsTimer);
+  if (v === "retro") { loadRetros(); clearInterval(retroTimer); retroTimer = setInterval(loadRetros, 30000); }
+  else clearInterval(retroTimer);
 }
 
 async function loadStats() {
