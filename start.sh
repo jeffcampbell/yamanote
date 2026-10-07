@@ -1,5 +1,5 @@
 #!/bin/bash
-# Yamanote orchestrator launcher — restarts automatically on exit (e.g. after ops self-restart)
+# Yamanote launcher — restarts automatically on exit.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -9,8 +9,8 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Yamanote starting..."
 
 while true; do
     [ -f "$SCRIPT_DIR/.env" ] && set -a && source "$SCRIPT_DIR/.env" && set +a
-    python3 orchestrator.py "$@"
+    python3 -m yamanote "$@"
     EXIT_CODE=$?
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Orchestrator exited (rc=$EXIT_CODE), restarting in 3 seconds..."
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Yamanote exited (rc=$EXIT_CODE), restarting in 3 seconds..."
     sleep 3
 done

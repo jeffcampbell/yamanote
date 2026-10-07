@@ -2,429 +2,399 @@
 
 ![Yamanote](img/yamanote_banner.png)
 
-A multi-agent orchestrator that coordinates Claude Code agent personas — **Dispatcher**, **Triage**, **Conductor**, **Inspector**, **Signal**, **Station Manager**, and **Operations** — to autonomously develop and maintain a software project. Agents communicate through a folder-based message bus and follow a structured spec-driven development pipeline.
+A software factory that runs on the loop line. Work items are **trains**: each one
+boards at Intake and travels a fixed line of **stations** — triage, spec, build,
+inspect, verify, merge, deploy — with an AI agent working at each stop, and ends its
+journey at a **retrospective** that teaches the next train. Production signals feed new
+work back to Intake, closing the loop.
 
-Built to run unattended on a Raspberry Pi (or any Linux machine) as a systemd service.
+Agents run on [OpenRouter](https://openrouter.ai) through a native tool-calling loop
+(no CLI subprocesses), so any model can work any station and every token, tool call
+and cent is tracked per work item. Cheap typed decisions — how hard is this? is it a
+duplicate? which files matter? is this log error real? — go to
+[Jev](https://jevtypesafeai.com/jev/api) via `decide` (`~/development/decide`) first, and
+LLM tokens are spent only where Jev is unsure.
 
-## Architecture
+Stdlib-only Python 3.11+, no build step for the UI. Built to run unattended on a
+Raspberry Pi (or any machine) as a systemd service.
 
-The orchestrator runs a tick loop (every 10 seconds by default) that evaluates phases in order:
+![The line](img/yamanote_line.png)
 
+## Contents
+
+- [The line](#the-line) · [Service classes](#service-classes) · [Line-wide crew](#line-wide-crew)
+- [Checks and the merge queue](#checks-and-the-merge-queue)
+- [Retrospective & continuous learning](#retrospective--continuous-learning)
+- [Post-deploy watch](#post-deploy-watch) · [Notifications](#notifications-hooks)
+- [Dashboard](#dashboard) · [API](#api)
+- [Getting started](#getting-started) · [Configuration](#configuration) · [Guardrails](#guardrails)
+- [Upgrading from the old orchestrator](#upgrading-from-the-old-orchestrator) · [Development](#development)
+
+## The line
+
+| | Station | What happens | Default model |
+|---|---|---|---|
+| JY01 | **Intake** | Work arrives from the **Dispatcher** (surveys the codebase), **Signal** (watches app logs), or a human via the dashboard | Rapid |
+| JY02 | **Triage** | Jev scores usefulness, readiness, duplication and difficulty. Clear-cut cases are decided by Jev alone; the rest go to an LLM gate (BUILD / REJECT / HOLD). Human requests skip the gate | Jev, then Local |
+| JY03 | **Spec** | Acceptance criteria, an implementation plan, relevant files (Jev-ranked), and 2–5 **holdout scenarios** that are sealed from the builder. Optional human gate | Rapid |
+| JY04 | **Build** | Builder agent implements in its own git worktree; the factory commits, then runs the project's **test command** (free, no model) and sends the train straight back if it fails | the train's class |
+| JY05 | **Inspect** | Code review of the diff against the spec; approves or sends the train back with specific issues | one class up |
+| JY06 | **Verify** | A separate verifier executes the holdout scenarios against the build. **Satisfaction** = scenarios passed / runnable. Below the threshold, the train returns to Build with the *observed behaviour*, never the scenario script | Rapid |
+| JY07 | **Merge** | Optional human gate, then the **merge queue**: one train per project at a time merges the latest trunk into its branch, re-runs the tests on the combination, then lands. Conflicts go back to the builder; the result is re-inspected, re-verified and re-approved | — |
+| JY08 | **Deploy** | Service restart or Railway staging → production, then a **post-deploy watch** of the app logs | — |
+| JY09 | **Retro** | Every journey — arrived or failed — ends with a **retrospective** that writes per-station playbook notes for the next train, retires notes that aren't helping, and judges the model class | Rapid |
+
+**Holdout scenarios** are the core of the factory's quality gate: an agent that
+writes both the code and the tests can make "tests pass" meaningless, so the
+end-to-end checks are written up front by a different agent and never shown to the
+builder ([background](https://simonwillison.net/2026/Feb/7/software-factory)).
+
+- When a scenario fails, a cheap **Redactor** rewrites the verifier's observations as
+  behavioural defects ("listing an empty file prints a blank line; it should print
+  nothing") so the builder learns *what* is wrong without learning *how it is checked*.
+- If a scenario is itself wrong — its expected result contradicts its own steps or the
+  acceptance criteria — the verifier can **dispute** it with its reasoning. Disputed
+  scenarios are excluded from satisfaction and shown as ⚠ DISPUTED in the train's
+  timeline, for at most half of a train's scenarios; dispute more than that and they
+  all count as failures. Retrospectives use disputes to teach the spec writer.
+
+A train gets up to 4 build attempts (3 reworks); from the third, it moves up a service
+class each time.
+
+### Service classes
+
+Each train's **service class** picks the model it runs on. Jev scores the item's
+difficulty at Triage; repeated rework escalates the train.
+
+| Class | | Used for | Default model |
+|---|---|---|---|
+| Local | 各停 | trivial / small | `deepseek/deepseek-v4-pro` |
+| Rapid | 快速 | moderate | `minimax/minimax-m3` |
+| Limited Express | 特急 | hard / very hard | `anthropic/claude-sonnet-5.5` |
+| Shinkansen | 新幹線 | escalation only | `anthropic/claude-opus-5.5` |
+
+Train numbers carry the class the train departed in (`0042G` Local, `K` Rapid, `E`
+Limited Express, `S` Shinkansen) and keep it even if the train escalates.
+
+**Adaptive routing** (`AGENT_TEAM_ADAPTIVE_ROUTING=1`, off by default): with 5+
+finished items, a difficulty level whose class passes first time less than 50% of the
+time — or that retrospectives mostly call too weak — is moved up a class; one passing
+over 90% first time, or that retrospectives call overkill, tries a class cheaper. It
+never auto-routes to Shinkansen. The routing card on the dashboard shows the history
+either way.
+
+Override any class or station in `models.json` (see `models.json.example`). Station
+values are a class name, `builder` (the train's class), `builder+1`, or a literal
+OpenRouter model id. Every call lists `openrouter/auto` as a fallback
+(`YAMANOTE_FALLBACK_MODEL`).
+
+### Line-wide crew
+
+- **Dispatcher** keeps the line fed: when trains are free it proposes the single most
+  valuable change for the scheduled project, aware of what is in flight, built,
+  recently rejected, and its own playbook notes.
+- **Signal** tails app logs (or Railway). New ERROR/Traceback bursts are screened by
+  Jev ("actionable? already tracked?") before an LLM files a bug.
+- **Operations** writes an hourly digest of the line with recommendations drawn from
+  the real settings list. It does not edit code.
+
+## Checks and the merge queue
+
+Give each project its own commands in `projects.json` (or `AGENT_TEAM_SETUP_CMD` /
+`AGENT_TEAM_TEST_CMD` for a single project):
+
+```json
+{"projects": {"my-app": {"path": "~/development/my-app",
+                         "setup": "npm ci",
+                         "test": "npm test -- --watchAll=false"}}}
 ```
-service_recovery → rework → dispatcher → triage → conductor → inspector → signal → entropy_check → station_manager_check
+
+- **setup** runs once per worktree — dependencies are git-ignored, so a fresh worktree
+  has none (`npm ci`, `uv sync`, `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`).
+- **test** runs after every build, before any reviewer tokens are spent, and again in
+  the merge queue on branch + latest trunk, so two trains that each pass alone can't
+  break trunk together. Without a test command the queue still merges trunk in first,
+  but lands without an integration check (the dashboard shows "NO TESTS").
+
+Checks appear in each train's Runs tab as free `checks` runs with their output. Their
+time limits are `AGENT_TEAM_SETUP_TIMEOUT` (900s) and `AGENT_TEAM_TEST_TIMEOUT` (600s).
+
+## Retrospective & continuous learning
+
+Every train that arrives or fails stops at **JY09 Retro** before its journey closes.
+Rejected and cancelled trains skip it, and Cancel on a train in retro skips the
+retrospective but keeps its outcome. The retrospective reads the whole journey — time
+and cost per station, reworks and why, check and scenario results, disputes,
+conflicts, the model class — and the project's current **playbook**, then records:
+
+- a summary, what went well and wrong, and the **root cause** of any rework or failure;
+- up to three **playbook notes**, each addressed to one station (dispatcher, triage,
+  spec, build, inspect, verify). Future trains on that project get each station's notes
+  in that station's prompt — the spec writer learns to pin down error messages, the
+  builder learns the project's conventions, the verifier learns what to double-check;
+- notes to **retire** when the journey shows they're wrong or not helping;
+- a **class fit** verdict (too weak / right / overkill) that feeds adaptive routing.
+
+Notes are measured: each counts the trains that ran with it and how many arrived
+without rework. A note used by 8+ trains with under 30% first-pass success is retired
+automatically, and each station keeps at most 6 (the weakest makes room). The
+dashboard's **Retrospectives & playbook** card shows recent retros and every note with
+its record; remove any note with ×.
+
+A retrospective usually costs well under a cent. If the model returns an empty or
+template answer it retries once a class up (a few cents). It runs even for a train that
+exhausted its budget — learning why matters most then — never holds a train set, and
+if it fails the journey simply closes. `AGENT_TEAM_RETRO=0` turns it off.
+
+![The Retro tab of a train that needed one rework: summary, root cause, what went well and wrong, and the model-class verdict](img/yamanote_retro.png)
+
+## Post-deploy watch
+
+For `AGENT_TEAM_DEPLOY_WATCH_SECONDS` (default 15 min) after each deploy, Signal
+compares new log errors against the error signatures seen in the previous 24 hours.
+Anything new is filed straight away as a high-priority bug linked to the train that
+just deployed (no model call needed; the bug then goes through triage like any other),
+and a `regression` notification fires. With `AGENT_TEAM_AUTO_REVERT=1` the merge is
+also reverted on trunk and redeployed. Signature history is kept in memory, so the
+first watch after a restart has a smaller baseline.
+
+## Notifications (hooks)
+
+Yamanote doesn't talk to any messaging service directly; it hands events to a hook you
+own. Configure either or both:
+
+```bash
+# A command: the event JSON arrives on stdin; YAMANOTE_EVENT, YAMANOTE_TITLE,
+# YAMANOTE_MESSAGE, YAMANOTE_URL and YAMANOTE_ITEM_ID are set in its environment.
+AGENT_TEAM_NOTIFY_CMD='your-signal-cli send "$YAMANOTE_TITLE: $YAMANOTE_MESSAGE $YAMANOTE_URL"'
+# A webhook: receives the same JSON as a POST.
+AGENT_TEAM_NOTIFY_WEBHOOK=https://example.com/hooks/yamanote
+AGENT_TEAM_NOTIFY_EVENTS=gate,failed,suspended,regression,reverted,stalled   # the default
+AGENT_TEAM_PUBLIC_URL=http://raspi-5.local:8080    # used for deep links in messages
 ```
 
-Each phase decides whether to launch its agent based on the current state of the pipeline. Only one instance of each agent runs at a time.
+| Event | When |
+|---|---|
+| `gate` | A train is waiting for spec or merge approval |
+| `failed` | A train was terminated (gave up, SLA, persistent conflict, over budget) |
+| `done` | A train arrived (off by default) |
+| `suspended` | Departures stopped: daily budget, out of OpenRouter credit, rate limits, network down |
+| `regression` | New errors appeared in the app logs soon after a deploy |
+| `reverted` | A merge was reverted automatically |
+| `stalled` | A project's dispatcher paused after repeated rejections |
 
-### Agents
+Payload:
 
-| Agent | Model | Role |
-|---|---|---|
-| **Dispatcher** | Sonnet | Analyzes the codebase and app logs to write feature specs when the backlog is empty |
-| **Triage** | Sonnet | Gates each spec before Conductor runs — evaluates usefulness, priority, and readiness |
-| **Conductor** | Sonnet | Implements specs on feature branches, one at a time |
-| **Inspector** | Sonnet | Reviews diffs against `main`. Verifies spec acceptance criteria, approves or requests changes |
-| **Signal** | Sonnet | Monitors application logs for errors and files bug tickets into the backlog |
-| **Station Manager** | Sonnet | Resets branches when Conductor gets stuck in edit loops |
-| **Operations** | Sonnet | Analyzes orchestrator activity and implements small operational improvements |
-
-### Pipeline flow
-
-```
-Dispatcher creates spec
-       ↓
-Triage gate (BUILD / REJECT / HOLD)
-       ↓
-Conductor implements on feature branch
-       ↓
-Inspector reviews diff + verifies acceptance criteria
-      ↙         ↘
-  APPROVED   CHANGES_REQUESTED
-     ↓              ↓
- Merge to main   Conductor rework (up to 3 attempts)
-     ↓                ↓
-Service restart    Re-review
+```json
+{"event": "gate", "title": "Yamanote: #12 waiting for merge approval",
+ "message": "add-csv-export — Signal at red — waiting for human merge approval",
+ "url": "http://raspi-5.local:8080/#item-12", "ts": 1791320000.0,
+ "item": {"id": 12, "title": "add-csv-export", "kind": "feature", "project": "/home/pi/development/my-app",
+          "station": "merge", "status": "waiting", "service_class": "local", "cost_usd": 0.21,
+          "attempt": 1, "branch": "yamanote/12-add-csv-export"},
+ "data": {}}
 ```
 
-REJECTED specs are logged to `agents/rejected_specs.txt`. HOLD specs move to `agents/drafts/` and are automatically recycled back to the backlog after 24 hours for re-evaluation.
+`url` is present only when `AGENT_TEAM_PUBLIC_URL` is set; `item` only for train events.
+Hooks run on a background thread with a 30s timeout; failures show up as line
+announcements and never stall the line.
 
-### Directory structure
+## Dashboard
 
-```
-yamanote/
-├── orchestrator.py       # Main orchestration loop
-├── config.py             # All configuration and agent prompts
-├── metrics.py            # Prometheus-compatible metrics registry (stdlib-only)
-├── dashboard.py          # Optional web dashboard + /metrics endpoint
-├── dashboard.html        # Dashboard UI (single-page, dark theme)
-├── SETUP.md              # AI-agent-friendly setup instructions
-├── agent-team.service    # systemd unit file
-├── start.sh              # Wrapper that auto-restarts on exit
-├── .env.example          # Template for environment variables
-└── agents/               # Runtime data (gitignored)
-    ├── backlog/          # JSON spec files (features and bugs)
-    ├── drafts/           # HOLD specs awaiting re-evaluation
-    ├── review/           # Inspector feedback files
-    ├── logs/             # Stdout/stderr from each agent run
-    └── activity.log      # Human-readable event log
+![A train](img/yamanote_train.png)
+
+- **The loop** — live line map of all nine stations; trains sit at their station, glow
+  while an agent is working, and show a red signal when waiting at a human gate. Below
+  900px wide it becomes a vertical line diagram with tappable train chips.
+- **KPIs** — trains in service, arrivals, average journey, fare per arrival, holdout
+  satisfaction, 24h spend.
+- **Train diagram (ダイヤ)** — the classic timetable chart: time across, stations down,
+  one line per train over the last 3h / 12h / 24h / 7d. Bottlenecks show up as long
+  flat runs; reworks as dashed jumps back up the line.
+- **Departures / Arrivals boards** — every work item with its service class, current
+  station, status (on time, rework, delayed, signal, reflecting), journey time and fare.
+  Columns drop away gracefully as the board narrows.
+- **Train drawer** (click any train) — door-LCD route strip, gate Approve/Reject,
+  Cancel/Retry, fare/tokens/attempts/satisfaction, and tabs for the event timeline, the
+  spec with its sealed scenarios and per-scenario evidence, the Retro, and every agent
+  run with its tool calls streaming live.
+- **Crew & signals** — Dispatcher/Signal/Ops/Jev status, each project's checks and
+  post-deploy watch, notification status, latest ops report.
+- **Service classes & routing** — model per class with 24h spend and cache-hit rate,
+  difficulty → class routing with first-pass rate, fare and class-fit votes.
+- **Retrospectives & playbook** — recent retros and each project's playbook by station.
+- **Line announcements** — the event feed.
+- **+ New request** — add work by hand. **Pause line / Resume line** stops and restarts
+  departures (resume also clears an API suspension).
+
+![Train diagram](img/yamanote_diagram.png)
+
+<p align="center">
+  <img src="img/yamanote_mobile.png" width="320" alt="Phone view: header with budget and line status, the nine stations as a vertical line diagram, and the KPI cards">
+</p>
+
+Works on phones and tablets; follows the system light/dark theme. Live updates use
+Server-Sent Events; `GET /metrics` serves Prometheus metrics.
+
+## API
+
+The dashboard is a thin client over a JSON API on the same port. When
+`AGENT_TEAM_DASHBOARD_TOKEN` is set, every `/api/*` and `/metrics` request needs it
+(`Authorization: Bearer <token>`, `?token=`, or the `yamanote_token` cookie). Every
+POST also needs the header `X-Yamanote: 1`, which blocks cross-site form posts.
+
+| Method & path | |
+|---|---|
+| `GET /api/state` | Everything the dashboard shows: trains, items, arrivals, stats, routing, playbooks, retros |
+| `GET /api/items/{id}` | One train: item (with scenarios), events, runs, retro |
+| `GET /api/runs/{id}/steps?after=N` | An agent run's steps (model turns, tool calls) |
+| `GET /api/events?after=N` | Line-wide event feed |
+| `GET /api/diagram?hours=12` | Station × time points for the train diagram |
+| `GET /api/stream` | Server-Sent Events: `item`, `event`, `run`, `step` |
+| `GET /metrics` | Prometheus metrics |
+| `POST /api/items` | New request: `{"title", "description", "kind", "priority", "project"}` |
+| `POST /api/items/{id}/approve` · `/reject` · `/cancel` · `/retry` | Gate and train controls (`reject` takes `{"reason"}`) |
+| `POST /api/pause` · `/api/resume` · `/api/dispatch` | Line controls |
+| `POST /api/playbook/delete` | Remove a note: `{"project", "id"}` |
+
+```bash
+curl -X POST localhost:8080/api/items -H 'X-Yamanote: 1' -H 'Content-Type: application/json' \
+  -d '{"title": "add-csv-export", "description": "Export tasks as CSV with `export FILE`.", "priority": "high"}'
 ```
 
 ## Getting started
 
-> **Quick setup with an AI agent:** Open this repo in Claude Code (or any AI coding tool) and say "follow SETUP.md". It will detect your project, write the config, and set up the service for you.
-
-### Prerequisites
-
-- **Python 3.11+**
-- **Claude Code CLI** — installed and authenticated (`claude` must be on your PATH). See [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code) for setup.
-- **Git** — the target project must be a git repository
-- **Linux with systemd** (for running as a service; manual invocation works anywhere)
-
-### 1. Clone the repository
+Prerequisites: Python 3.11+, git, an OpenRouter API key, and optionally a TypeSafe
+key plus a checkout of `decide` for Jev.
 
 ```bash
-git clone https://github.com/jeffcampbell/yamanote.git
-cd yamanote
+git clone https://github.com/jeffcampbell/yamanote.git && cd yamanote
+cp .env.example .env        # set OPENROUTER_API_KEY, AGENT_TEAM_DEV_DIR, AGENT_TEAM_DEFAULT_PROJECT
+./start.sh --dashboard      # or: python3 -m yamanote --dashboard-port 8080 [--host 0.0.0.0]
 ```
 
-### 2. Configure your target project
+Open <http://localhost:8080>. Keys are also read from `~/development/.env`.
 
-Copy the example environment file and edit it:
+> **AI-assisted setup:** open this repo in a coding agent and say "follow SETUP.md".
 
-```bash
-cp .env.example .env
-```
+Before leaving it unattended, set a test command for each project (above), pick a daily
+budget, decide whether you want the merge gate, and set a spending limit on the
+OpenRouter key itself.
 
-Set the environment variables for your project:
+### Run as a service
 
-```bash
-# Path to the parent directory containing your project(s)
-AGENT_TEAM_DEV_DIR=~/Development
+Copy `agent-team.service` to `/etc/systemd/system/`, adjust `User` and paths, then
+`sudo systemctl enable --now agent-team`. If your restart command uses `sudo`, give
+the service user passwordless sudo for exactly that command.
 
-# Name of the default project directory to manage
-AGENT_TEAM_DEFAULT_PROJECT=my-app
+## Configuration
 
-# Command to restart your app after a merge (leave empty to skip)
-AGENT_TEAM_SERVICE_RESTART_CMD=sudo systemctl restart my-app.service
-```
+| File | What it holds |
+|---|---|
+| `.env` | Keys and settings (every variable is listed with its default in `.env.example`) |
+| `projects.json` | Which projects to work on, with per-project schedule, priority, gates, setup/test commands and decide backend (`projects.json.example`) |
+| `models.json` | Model per service class and per station (`models.json.example`) |
+| `agents/` | Runtime data: `yamanote.db` (SQLite: items, events, runs, steps, retros, playbooks), the `pause` file and the PID lock. Move it with `YAMANOTE_DATA_DIR` |
 
-### 3. Run manually
-
-Load the environment and start the orchestrator:
-
-```bash
-./start.sh
-```
-
-Or directly:
-
-```bash
-source .env && python3 orchestrator.py
-```
-
-The orchestrator creates `agents/backlog/`, `agents/review/`, `agents/drafts/`, and `agents/logs/` on first run. Press `Ctrl+C` to gracefully shut down all agents.
-
-### 4. Run as a systemd service
-
-Copy and adapt the included unit file:
-
-```bash
-sudo cp agent-team.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable agent-team
-sudo systemctl start agent-team
-```
-
-The unit file includes an `EnvironmentFile` directive that loads your `.env` automatically. Edit the `[Service]` section paths to match your setup:
-
-- `WorkingDirectory` — path to the cloned repo
-- `ExecStart` — path to `start.sh` in this repo
-- `EnvironmentFile` — path to your `.env` file
-- `User` — the user to run as
-
-If your `AGENT_TEAM_SERVICE_RESTART_CMD` uses `sudo`, ensure the service user has passwordless sudo for that command:
-
-```bash
-# /etc/sudoers.d/yamanote
-<your-user> ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart your-app.service
-```
-
-### 5. Monitor
-
-```bash
-# Service status
-systemctl status agent-team
-
-# Live activity log
-tail -f agents/activity.log
-
-# Agent subprocess logs
-ls -lt agents/logs/ | head
-```
-
-### 6. Web dashboard (optional)
-
-![Dashboard](img/yamanote_dashboard.png)
-*The pipeline view shows specs traveling around the Yamanote loop — from Spec through Create, Review, Rework, and finally Merged — with agent status cards and train counts below.*
-
-A locally-hosted web dashboard gives an at-a-glance view of agent status, pipeline progress, backlog, and recent activity — accessible from any device on the LAN. Disabled by default.
-
-**Enable via CLI flag:**
-```bash
-python3 orchestrator.py --dashboard              # port 8080
-python3 orchestrator.py --dashboard-port 9090    # custom port
-```
-
-**Enable via environment variable** (recommended for systemd):
-```bash
-# Add to .env
-AGENT_TEAM_DASHBOARD_PORT=8080
-```
-
-Then open `http://<host>:8080/` in a browser. The page auto-refreshes every 10 seconds.
-
-The dashboard shows:
-- **Agent cards** — status (running/idle/cooldown), PID, elapsed time, model
-- **Pipeline** — current stage (Spec, Create, Review, Rework, Merged)
-- **Stats** — launches per hour, sleep mode indicator
-- **Backlog** — queued specs with priority
-- **Activity feed** — color-coded event log
-- **Configuration** — collapsible current settings
-
-![Travel Board](img/yamanote_travel_board.png)
-*The travel board tracks specs as they move through the pipeline — Backlog (awaiting departure), Traveling (in transit with a train), and Arrived (merged to trunk) — styled after a Japanese train station departure board.*
-
-A JSON API is also available at `GET /api/status` for programmatic access.
-
-#### Prometheus metrics
-
-When the dashboard is enabled, a Prometheus-compatible `/metrics` endpoint is served at the same port:
-
-```
-GET http://<host>:<port>/metrics
-```
-
-Metrics exposed:
-
-| Metric | Type | Description |
-|---|---|---|
-| `yamanote_specs_total` | Counter | Specs processed, labelled by outcome (`merged`, `rejected`, `conflict`, `entropy`, `sla_breach`) |
-| `yamanote_agent_launches_total` | Counter | Agent subprocess launches, labelled by agent name |
-| `yamanote_agent_failures_total` | Counter | Non-zero agent exits, labelled by agent name |
-| `yamanote_log_errors_detected_total` | Counter | ERROR/WARNING lines detected by the log watcher |
-| `yamanote_signal_triggers_total` | Counter | Times Signal was triggered reactively by the log watcher |
-| `yamanote_backlog_size` | Gauge | Current number of specs in the backlog |
-| `yamanote_trains_active` | Gauge | Number of trains currently assigned to a spec |
-| `yamanote_launches_last_hour` | Gauge | Agent launches in the past 60 minutes |
-| `yamanote_sleep_mode_active` | Gauge | `1` if rate-limit sleep mode is active |
-| `yamanote_uptime_seconds` | Gauge | Seconds since the orchestrator started |
-
-Point Prometheus at `http://<host>:<port>/metrics` and connect Grafana for dashboards.
-
-## Customizing for your project
-
-Yamanote is a general-purpose orchestrator. All project-specific context comes from configuration and files in your target project — the agent prompts are intentionally generic.
-
-### Required
-
-1. **Set `AGENT_TEAM_DEFAULT_PROJECT`** — the directory name of your project under `AGENT_TEAM_DEV_DIR`:
-   ```bash
-   AGENT_TEAM_DEFAULT_PROJECT=my-app
-   ```
-
-2. **Create a `CLAUDE.md`** in your project's root — this is the primary way agents understand your project. Include:
-   - Build and test commands (`npm run build`, `./gradlew assembleDebug`, etc.)
-   - Architecture overview (framework, language, key directories)
-   - Coding conventions and style preferences
-   - Any constraints agents should respect
-
-### Optional
-
-- **Create a `SPEC.md`** in your project with a feature roadmap or product spec. The Dispatcher reads this to generate more targeted feature specs.
-- **Set Railway env vars** for Railway deployment:
-  ```bash
-  AGENT_TEAM_RAILWAY_PROJECT=my-railway-project
-  AGENT_TEAM_RAILWAY_SERVICE=my-service-name
-  ```
-- **Set `AGENT_TEAM_SERVICE_RESTART_CMD`** for local service restarts after merges:
-  ```bash
-  AGENT_TEAM_SERVICE_RESTART_CMD="sudo systemctl restart my-app.service"
-  ```
-- **Set `AGENT_TEAM_APP_LOG_GLOB`** so Signal can monitor your application logs:
-  ```bash
-  AGENT_TEAM_APP_LOG_GLOB="logs/*.log"
-  ```
-- **Set `AGENT_TEAM_DASHBOARD_PORT`** to enable the web dashboard and `/metrics` endpoint:
-  ```bash
-  AGENT_TEAM_DASHBOARD_PORT=8080
-  ```
-
-## Adding work manually
-
-Drop a JSON spec file into `agents/backlog/`:
+### Multiple projects
 
 ```json
 {
-  "title": "short-kebab-title",
-  "description": "What to build, acceptance criteria, and constraints.",
-  "priority": "high",
-  "created_by": "manual",
-  "working_dir": "/path/to/your/project"
+  "projects": {
+    "my-app":   {"path": "~/development/my-app", "priority": 1, "gates": {"merge": true},
+                 "setup": "npm ci", "test": "npm test", "decide_backend": "ollama"},
+    "side-gig": {"path": "~/development/side-gig", "priority": 2, "schedule": "22-6"},
+    "paused":   {"path": "~/development/old", "paused": true}
+  }
 }
 ```
 
-Conductor picks up the highest-priority spec first (`high` > `medium` > `low`), then oldest within the same priority. The Dispatcher also generates specs automatically when the backlog is empty.
+The Dispatcher picks projects in their schedule window first (hours, inclusive, wraps
+midnight), then unscheduled ones by priority. `gates` overrides the global
+`AGENT_TEAM_GATE_SPEC` / `AGENT_TEAM_GATE_MERGE` per project. `decide_backend` picks
+where Jev-style decisions run for that project: `jev` (hosted, default), `ollama`
+(local `clef-flash`, for confidential code), or `off`. Jev's file ranking sends each
+file's path and first 6,000 characters, not whole files. Playbooks are per project.
 
-## Configuration reference
+## Guardrails
 
-All settings are in `config.py`. Key settings can be overridden via environment variables (see `.env.example`).
+- **Budgets:** daily (`AGENT_TEAM_DAILY_BUDGET_USD`, default $20), per item ($4, a
+  hard stop), per agent run ($2), and a runs-per-hour fare limit. Spend comes from
+  OpenRouter's reported cost per call, plus Jev at its token price. Signal's model
+  calls respect the budget too; retrospectives respect the daily budget but not the
+  per-item one. Also set a spending limit on the OpenRouter key itself.
+- **API trouble:** out of credit / bad key (401–403) pauses departures for an hour, a
+  rate-limit wall for 10 minutes, a network outage for 5 — the affected train goes back
+  to its station without spending an attempt. **Resume line** clears it early. A model
+  that returns an empty reply is re-asked instead of failing the run.
+- **Sandboxing:** file tools are confined to the train's worktree (symlink escapes
+  refused); `run` executes with secrets stripped from the environment, and anything it
+  leaves running in the background (dev servers) is killed when the agent finishes.
+  Shell access is **not** a hard sandbox: a command can read files elsewhere (including
+  `~/development/.env` and the holdout scenarios in the database). Run Yamanote as a
+  dedicated unprivileged user; containerised execution is on the roadmap.
+- **Scope:** projects must be git repos under `AGENT_TEAM_DEV_DIR`, and Yamanote never
+  works on itself.
+- **Loops:** up to 4 build attempts per train (with model escalation), max 3 conflict
+  retries, an item SLA (`AGENT_TEAM_ITEM_SLA_SECONDS`, 3h on the line, shifted when the
+  machine sleeps), retry-with-backoff for agent failures, and a stall pause after 5
+  consecutive rejections for a project. HOLD items return to triage after 24h; a third
+  HOLD becomes a REJECT.
+- **Merges:** one train per project lands at a time; the merge refuses a dirty or
+  wrong-branch main checkout (and retries every 5 minutes), and any conflict marker that
+  slips through reverts the merge. Any change after a merge approval — rework, conflict
+  resolution — needs approving again.
+- **Restarts:** interrupted runs are marked, their trains re-queued at the same station
+  (an interrupted build attempt isn't counted), and anything a verifier left in a
+  worktree is discarded. Shutdown waits at most 10s for in-flight model calls.
+- **Retention:** after 14 days, step-level detail and events of finished trains are
+  pruned (items, run summaries and retros stay) and old failed branches are deleted.
+- **Dashboard:** binds to 127.0.0.1 by default. To expose it on your network set
+  `AGENT_TEAM_DASHBOARD_HOST=0.0.0.0` *and* `AGENT_TEAM_DASHBOARD_TOKEN`, which is then
+  required for every API read and action (the page asks for it once and remembers it).
 
-### Environment variables
+## Upgrading from the old orchestrator
 
-| Variable | Default | Description |
-|---|---|---|
-| `AGENT_TEAM_DEV_DIR` | `~/Development` | Parent directory containing your project(s) |
-| `AGENT_TEAM_DEFAULT_PROJECT` | *(none — required)* | Project directory name under `AGENT_TEAM_DEV_DIR` |
-| `AGENT_TEAM_SERVICE_RESTART_CMD` | *(empty — skip restart)* | Shell command to restart your app after a merge |
-| `AGENT_TEAM_DASHBOARD_PORT` | `0` *(disabled)* | Port for the web dashboard and `/metrics` endpoint (`0` = off) |
-| `AGENT_TEAM_APP_LOG_GLOB` | *(auto-discover)* | Glob pattern for the project's log file (e.g. `logs/*.log`) |
-| `AGENT_TEAM_RAILWAY_PROJECT` | *(empty)* | Railway project name for post-merge deploys |
-| `AGENT_TEAM_RAILWAY_SERVICE` | *(empty)* | Railway service name |
-| `AGENT_TEAM_RAILWAY_STAGING_ENV` | `staging` | Railway environment for staging deploys |
-| `AGENT_TEAM_RAILWAY_PRODUCTION_ENV` | `production` | Railway environment for production deploys |
-| `AGENT_TEAM_REGULAR_TRAINS` | `0` | Number of high-complexity parallel pipelines |
-| `AGENT_TEAM_STANDARD_TRAINS` | `1` | Number of medium-complexity parallel pipelines |
-| `AGENT_TEAM_EXPRESS_TRAINS` | `0` | Number of low-complexity parallel pipelines |
+The Claude Code–based orchestrator (`orchestrator.py`, `config.py`, `dashboard.py`)
+was replaced by the `yamanote/` package. If you ran it before:
 
-### Timing
+- Use `./start.sh` or `python3 -m yamanote` (the systemd unit is updated).
+- `AGENT_TEAM_DEV_DIR`, `AGENT_TEAM_DEFAULT_PROJECT`, `AGENT_TEAM_SERVICE_RESTART_CMD`,
+  the Railway settings, `AGENT_TEAM_DASHBOARD_PORT` and `projects.json` work as before.
+  The old `AGENT_TEAM_{REGULAR,STANDARD,EXPRESS}_TRAINS` counts are summed into
+  `AGENT_TEAM_MAX_TRAINS` if that isn't set; trains are no longer typed — the service
+  class is chosen per item.
+- The `claude` CLI and `CLAUDE_CMD` are no longer used; set `OPENROUTER_API_KEY`.
+- Specs in `agents/backlog/` and `agents/drafts/` are not imported; add anything still
+  wanted with **+ New request**. `activity.log` and `agents/logs/` are no longer
+  written — the timeline lives in `agents/yamanote.db`.
+- The dashboard now binds to 127.0.0.1; see Guardrails to expose it.
+- Ops no longer edits the orchestrator's own code.
 
-| Setting | Default | Description |
-|---|---|---|
-| `TICK_INTERVAL` | 10s | Seconds between orchestration ticks |
-| `AGENT_TIMEOUT_SECONDS` | 1200s (20 min) | Max runtime per agent subprocess before termination |
-| `SLEEP_MODE_DURATION` | 3600s (1 hr) | How long to sleep when fare limit triggers |
+## Development
 
-### SLA thresholds
-
-| Setting | Default | Description |
-|---|---|---|
-| `SPEC_SLA_SECONDS` | 1800s (30 min) | Wall-clock limit for a spec across all phases |
-| `CHECKPOINT_SLA_SECONDS` | 120s (2 min) | Max idle time at a pipeline checkpoint before intervention |
-| `IDLE_SLA_SECONDS` | 14400s (4 hr) | All-idle time before the dispatcher is force-triggered |
-
-### Guardrails
-
-| Setting | Default | Description |
-|---|---|---|
-| `MAX_AGENT_LAUNCHES_PER_HOUR` | 30 | Triggers sleep mode when exceeded |
-| `AGENT_ERROR_COOLDOWN` | 120s | Base cooldown after an agent exits non-zero |
-| `MAX_ERROR_BACKOFF` | 3600s | Cap for exponential backoff on repeated failures |
-| `ENTROPY_FIX_COMMIT_THRESHOLD` | 5 | "fix"/"update" commits on a branch before Conductor is fired and the branch is reset |
-| `MAX_ENG_EDITS_BEFORE_RESET` | 5 | File edit cycles before Station Manager resets the branch |
-| `MAX_REWORK_ATTEMPTS` | 3 | Inspector change requests before the spec is abandoned |
-| `MAX_SPEC_TIMEOUTS` | 2 | Conductor timeouts on a spec before it is dropped |
-| `MAX_CONFLICT_RETRIES` | 3 | Merge conflict retries before a spec is permanently rejected |
-| `MAX_CONSECUTIVE_REJECTIONS` | 5 | Consecutive triage rejections before a project's dispatcher is paused |
-| `STALL_PAUSE_SECONDS` | 86400s (24 hr) | How long to pause a stalled project's dispatcher |
-| `DRAFTS_RECYCLE_AGE_SECONDS` | 86400s (24 hr) | Age before a HOLD spec is moved back to backlog |
-| `WORKTREE_GC_INTERVAL` | 3600s (1 hr) | How often to scan for and remove orphaned git worktrees |
-| `SELF_PROJECT_DIR` | `BASE_DIR` | Prevents agents from modifying the orchestrator itself |
-
-### Git
-
-| Setting | Default | Description |
-|---|---|---|
-| `TRUNK_BRANCH` | `main` | Branch that Conductor branches from and Inspector merges to |
-| `GIT_TIMEOUT` | 30s | Timeout for git subprocesses |
-
-## How the Dispatcher makes decisions
-
-The Dispatcher receives several pieces of context before proposing a spec:
-
-1. **App logs** — last 100 lines of the project's log file, for identifying errors and usage patterns
-2. **Rejected specs** — the last 20 rejections over 30 days, to avoid re-proposing ideas that failed triage
-3. **Work balance digest** — a summary of recent merged spec types (feature / bugfix / hardening / refactor) with a balance signal (e.g. `FEATURE-HEAVY`). The Dispatcher uses this as a soft signal — not a quota — to avoid overindexing on one type of work
-
-Log files are discovered automatically:
-1. `AGENT_TEAM_APP_LOG_GLOB` env var (if set)
-2. `logs/*.log` in the project directory
-3. `*.log` in the project root
-
-When multiple files match, the most recently modified one is used.
-
-## Extensible log sources
-
-The log watcher supports pluggable backends via the `LogSource` ABC. Two are built in:
-
-- **`FileLogSource`** — watches the project's local log file using byte offsets
-- **`RailwayLogSource`** — streams logs from Railway deployments via the `railway` CLI
-
-To add a custom backend (CloudWatch, k8s, Datadog, etc.):
-
-```python
-from orchestrator import LogSource
-
-class MySource(LogSource):
-    @property
-    def name(self) -> str:
-        return "my-source"
-
-    def fetch_new_lines(self, project_dir: str) -> list[str]:
-        # return new log lines since last call
-        return []
-
-station_manager.register_log_source(MySource())
 ```
-
-## Safety features
-
-- **Self-protection** — agents cannot create specs targeting the orchestrator's own codebase
-- **Fare limit** — enters sleep mode for 1 hour after 30 launches in a rolling hour
-- **Error cooldown** — exponential backoff (120s base, 1hr cap) on agent failures
-- **Entropy detection** — if a branch accumulates 5+ "fix"/"update" commits, the branch is deleted and the spec re-queued with a fresh start
-- **Timeout enforcement** — agents are terminated after 20 minutes; timeouts trigger exponential cooldown and specs are dropped after 2 consecutive timeouts
-- **Orphan recovery** — on startup, any `.in_progress` specs from a previous crash are restored to the backlog
-- **Working directory validation** — specs must target a directory under `DEVELOPMENT_DIR`
-- **Merge conflict detection** — before launching Inspector, the orchestrator performs a dry-run merge. If the branch conflicts with main, it is deleted and the spec re-queued (up to 3 attempts, then permanently rejected)
-- **Service restart timeout** — service restart commands are killed after 5 minutes to prevent the orchestrator from hanging
-- **Stall circuit breaker** — after 5 consecutive triage rejections with no successful merges, a project's dispatcher is paused for 24 hours to prevent infinite reject loops. Clears automatically when a spec merges
-- **Drafts recycler** — HOLD specs older than 24 hours are automatically moved back to the backlog for re-evaluation by triage
-- **Worktree GC** — orphaned `.worktrees/` directories (from crashes or config changes) are removed hourly to prevent git slowdown and disk accumulation
-- **Spec rename race protection** — the atomic `.in_progress` rename is protected against filesystem errors; a failed claim resets the pipeline cleanly rather than corrupting state
-
-## Manual controls
-
-### Pause / resume
-
-Touch the pause file to pause all agent launches. Remove it to resume:
+yamanote/
+├── __main__.py   # entry point: PID lock, signals, dashboard
+├── factory.py    # the tick loop, every station, retrospectives and playbooks
+├── agent.py      # OpenRouter tool-calling agent loop + sandboxed tools
+├── checks.py     # deterministic setup/test commands
+├── notify.py     # notification hooks (command / webhook)
+├── llm.py        # OpenRouter client (cost accounting, fallbacks, prompt caching)
+├── decisions.py  # Jev via decide: difficulty, triage screen, file relevance, log screen
+├── prompts.py    # station prompts and structured-result schemas
+├── store.py      # SQLite: items, events, runs, steps, retros, kv
+├── gitops.py     # worktrees, commits, merges, reverts
+├── dashboard.py  # JSON API, SSE stream, /metrics
+├── metrics.py    # Prometheus registry
+├── settings.py   # configuration
+└── web/          # dashboard UI (vanilla JS, no build step)
+```
 
 ```bash
-touch agents/pause    # pause
-rm agents/pause       # resume
+python3 -m unittest discover -s tests -t .   # offline; a scripted fake OpenRouter drives real git repos
 ```
 
-### Skip a spec
-
-Create a `.skip` file next to a backlog spec to exclude it from pickup:
-
-```bash
-touch agents/backlog/some_spec.json.skip    # skip
-rm agents/backlog/some_spec.json.skip       # unskip
-```
-
-### Dashboard controls
-
-When the dashboard is enabled, POST endpoints provide runtime control:
-
-| Endpoint | Action |
-|---|---|
-| `POST /api/pause` | Pause the orchestrator |
-| `POST /api/resume` | Resume the orchestrator |
-| `POST /api/skip/<filename>` | Skip a backlog spec |
-| `POST /api/unskip/<filename>` | Unskip a backlog spec |
-| `POST /api/retry/<agent_name>` | Clear cooldown and retry an agent immediately |
-| `GET /metrics` | Prometheus metrics (when dashboard is enabled) |
-
-## License
-
-MIT
+Tests never call OpenRouter or Jev. `tests/helpers.py` routes each model call to a
+per-role script by matching the station's system prompt, so a new station needs a role
+name there and a default script.
