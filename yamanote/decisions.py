@@ -54,8 +54,11 @@ def _load(backend: str | None = None):
         if not settings.DECIDE_ENABLED or name == "off":
             _errors[name] = "disabled"
             return None
-        if settings.DECIDE_SRC not in sys.path and os.path.isdir(settings.DECIDE_SRC):
-            sys.path.insert(0, settings.DECIDE_SRC)
+        if settings.DECIDE_SRC and settings.DECIDE_SRC not in sys.path:
+            if os.path.isdir(settings.DECIDE_SRC):
+                sys.path.insert(0, settings.DECIDE_SRC)
+            else:
+                log.warning("YAMANOTE_DECIDE_SRC=%s is not a directory", settings.DECIDE_SRC)
         try:
             from decide.cache import Cache
             from decide.config import get_backend
@@ -63,6 +66,9 @@ def _load(backend: str | None = None):
             _backends[name] = get_backend(name)
             _engines[name] = Engine(_backends[name], Cache())
             return _engines[name]
+        except ImportError:
+            _errors[name] = (f"decide isn't installed ({settings.DECIDE_INSTALL}, "
+                             "or set YAMANOTE_DECIDE_SRC to a checkout's src directory)")
         except SystemExit as e:  # decide reports a missing key this way
             _errors[name] = str(e)
         except Exception as e:

@@ -25,8 +25,19 @@ If it's missing, ask the user to create one at https://openrouter.ai/keys and ad
 also set a credit limit on the key in OpenRouter's settings as a backstop to
 Yamanote's own budgets.
 
-Jev is optional. It's available if `~/development/decide/src` exists and
-`TYPESAFE_API_KEY` is set. Without it, LLMs make its decisions instead.
+Jev is optional. It needs the [decide](https://github.com/jeffcampbell/Decide) package
+and `TYPESAFE_API_KEY`. Without them, LLMs make its decisions instead. Check whether
+decide is importable:
+
+```bash
+python3 -c "import decide" 2>/dev/null && echo installed || echo "not installed"
+```
+
+If it isn't and the user wants Jev, either `pip install
+git+https://github.com/jeffcampbell/Decide.git` or, where the system Python refuses
+pip installs (Debian, Raspberry Pi OS), clone it and set `YAMANOTE_DECIDE_SRC` to the
+clone's `src` directory in `.env` (step 3). The user adds `TYPESAFE_API_KEY=...` to `.env`
+themselves.
 
 ## Step 2: Choose the project
 

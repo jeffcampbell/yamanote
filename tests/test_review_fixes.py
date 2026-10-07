@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -498,3 +499,52 @@ class StoreMaintenanceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecideLoadingTest(unittest.TestCase):
+    """decide is an installed package (or a checkout via YAMANOTE_DECIDE_SRC)."""
+
+    def setUp(self):
+        from yamanote import decisions, settings
+        self.decisions, self.settings = decisions, settings
+        saved = (settings.DECIDE_ENABLED, settings.DECIDE_SRC, dict(decisions._errors), dict(decisions._engines))
+        def restore():
+            settings.DECIDE_ENABLED, settings.DECIDE_SRC = saved[0], saved[1]
+            decisions._errors.clear(); decisions._errors.update(saved[2])
+            decisions._engines.clear(); decisions._engines.update(saved[3])
+        self.addCleanup(restore)
+        settings.DECIDE_ENABLED, settings.DECIDE_SRC = True, ""
+        decisions._errors.clear()
+        decisions._engines.clear()
+
+    def test_missing_package_explains_how_to_install(self):
+        from unittest import mock
+        hidden = {m: None for m in ("decide", "decide.cache", "decide.config", "decide.engine")}
+        with mock.patch.dict(sys.modules, hidden):
+            self.assertIsNone(self.decisions._load("jev"))
+        err = self.decisions.status("jev")["error"]
+        self.assertIn("github.com/jeffcampbell/Decide", err)
+        self.assertIn("YAMANOTE_DECIDE_SRC", err)
+
+    def test_source_override_is_importable(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as src:
+            pkg = os.path.join(src, "decide")
+            os.makedirs(pkg)
+            for mod, body in {"__init__": "", "cache": "class Cache: pass\n",
+                              "engine": "class Engine:\n    def __init__(self, b, c): self.b = b\n",
+                              "config": "def get_backend(name): return 'backend:' + name\n"}.items():
+                with open(os.path.join(pkg, mod + ".py"), "w") as f:
+                    f.write(body)
+            self.settings.DECIDE_SRC = src
+            stale = {m: v for m, v in sys.modules.items() if m == "decide" or m.startswith("decide.")}
+            for m in stale:
+                del sys.modules[m]
+            try:
+                self.assertEqual(self.decisions._load("jev").b, "backend:jev")
+            finally:
+                sys.path.remove(src)
+                for m in [m for m in sys.modules if m == "decide" or m.startswith("decide.")]:
+                    del sys.modules[m]
+                sys.modules.update(stale)

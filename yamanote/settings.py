@@ -83,7 +83,10 @@ def openrouter_key() -> str | None:
 
 # ─── decide / Jev ────────────────────────────────────────────────────────────
 
-DECIDE_SRC = os.path.expanduser(_env("YAMANOTE_DECIDE_SRC", "~/development/decide/src"))
+# decide is imported as an installed package; YAMANOTE_DECIDE_SRC points at a
+# checkout's src/ instead (https://github.com/jeffcampbell/Decide).
+DECIDE_INSTALL = "pip install git+https://github.com/jeffcampbell/Decide.git"
+DECIDE_SRC = os.path.expanduser(_env("YAMANOTE_DECIDE_SRC", ""))
 DECIDE_ENABLED = _env_bool("YAMANOTE_DECIDE", True)
 DECIDE_BACKEND = _env("DECIDE_BACKEND", "jev")
 

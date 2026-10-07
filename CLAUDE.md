@@ -2,8 +2,8 @@
 
 Yamanote is a software factory: work items ("trains") travel stations JY01–JY09
 (intake → triage → spec → build → inspect → verify → merge → deploy → retro), with
-OpenRouter agents at each station and Jev (via `~/development/decide`) for cheap
-decisions. User-facing docs: `README.md`; guided install for agents: `SETUP.md`.
+OpenRouter agents at each station and Jev (via the
+[decide](https://github.com/jeffcampbell/Decide) package) for cheap decisions. User-facing docs: `README.md`; guided install for agents: `SETUP.md`.
 
 ## Layout (`yamanote/`)
 
@@ -17,7 +17,7 @@ decisions. User-facing docs: `README.md`; guided install for agents: `SETUP.md`.
 | `cron.py` | Five-field cron parser (`prev`/`next`) for the autopilot schedule |
 | `store.py` | SQLite: items, events, runs, steps, retros, kv. `Store.transition()` is compare-and-set — use it for status changes from jobs |
 | `prompts.py` | Station system prompts + JSON result schemas |
-| `decisions.py` | Jev questions (difficulty, triage screen, file relevance, log screen); every call returns None when decide is unavailable |
+| `decisions.py` | Jev questions (difficulty, triage screen, file relevance, log screen); imports `decide` (installed, or `YAMANOTE_DECIDE_SRC`); every call returns None when decide is unavailable |
 | `checks.py`, `gitops.py`, `notify.py`, `dashboard.py`, `settings.py`, `web/` | Deterministic checks, git, hooks, API/SSE, config, UI |
 
 ## Conventions

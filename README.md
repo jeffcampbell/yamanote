@@ -11,9 +11,10 @@ work back to Intake, closing the loop.
 Agents run on [OpenRouter](https://openrouter.ai) through a native tool-calling loop
 (no CLI subprocesses), so any model can work any station and every token, tool call
 and cent is tracked per work item. Cheap typed decisions — how hard is this? is it a
-duplicate? which files matter? is this log error real? — go to
-[Jev](https://jevtypesafeai.com/jev/api) via `decide` (`~/development/decide`) first, and
-LLM tokens are spent only where Jev is unsure.
+duplicate? which files matter? is this log error real? — go first to TypeSafe's
+[Jev](https://jevtypesafeai.com/jev/api), a cheap System One decision model, through
+[decide](https://github.com/jeffcampbell/Decide), and LLM tokens are spent only where
+Jev is unsure.
 
 Stdlib-only Python 3.11+, no build step for the UI. Built to run unattended on a
 Raspberry Pi (or any machine) as a systemd service.
@@ -408,13 +409,29 @@ curl -X POST localhost:8080/api/items -H 'X-Yamanote: 1' -H 'Content-Type: appli
 ## Getting started
 
 Prerequisites: Python 3.11+, git, an OpenRouter API key, and optionally a TypeSafe
-key plus a checkout of `decide` for Jev.
+key for Jev.
 
 ```bash
 git clone https://github.com/jeffcampbell/yamanote.git && cd yamanote
 cp .env.example .env        # set OPENROUTER_API_KEY, AGENT_TEAM_DEV_DIR, AGENT_TEAM_DEFAULT_PROJECT
 ./start.sh --dashboard      # or: python3 -m yamanote --dashboard-port 8080 [--host 0.0.0.0]
 ```
+
+**Jev (optional).** Yamanote uses [decide](https://github.com/jeffcampbell/Decide) to
+talk to Jev. Like Yamanote it is standard-library only. Either install it into the
+Python that runs Yamanote, or clone it and point Yamanote at the checkout. The clone
+is easier where the system Python refuses `pip install`, as on Debian and Raspberry Pi OS:
+
+```bash
+pip install git+https://github.com/jeffcampbell/Decide.git
+# or
+git clone https://github.com/jeffcampbell/Decide.git ~/decide
+echo "YAMANOTE_DECIDE_SRC=$HOME/decide/src" >> .env
+```
+
+Then add `TYPESAFE_API_KEY=...` to `.env`. Without decide or the key, LLMs make Jev's
+decisions instead, at more cost. The Jev line in the dashboard's Crew card shows
+whether it loaded, and why not.
 
 Open <http://localhost:8080>. Keys are also read from `~/development/.env`.
 
