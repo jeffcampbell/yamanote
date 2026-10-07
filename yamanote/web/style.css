@@ -185,10 +185,23 @@ main > *, .boards > *, .lower > *, .kpis > * { min-width: 0; }
 .diagram-legend { margin-top: 6px; }
 .routing .levels td:first-child { text-transform: capitalize; white-space: nowrap; }
 .routing .why { font-size: 11px; color: var(--muted); }
-.retro-row { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; cursor: pointer; }
-.retro-row:hover .retro-title { text-decoration: underline; }
-.retro-row .retro-title { font-weight: 700; font-size: 13px; }
-.retro-row .retro-sum { grid-column: 1 / -1; color: var(--muted); overflow-wrap: anywhere; }
+.retro-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (min-width: 1100px) { .retro-grid { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); } }
+.retro-entry { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.retro-entry:last-child { border-bottom: 0; }
+.retro-entry .r-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.retro-entry .r-title { font-weight: 700; cursor: pointer; overflow-wrap: anywhere; }
+.retro-entry .r-title:hover { text-decoration: underline; }
+.retro-entry .r-meta { font-size: 12px; color: var(--muted); }
+.retro-entry p { font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
+.retro-entry .r-cause { color: var(--muted); }
+.retro-entry .r-cause b { color: var(--text); font-weight: 600; }
+.retro-entry details { margin-top: 6px; font-size: 13px; }
+.retro-entry summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.retro-entry details ul { padding-left: 18px; margin: 4px 0 6px; }
+.retro-entry details h5 { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin-top: 8px; }
+.pb-project { font-size: 14px; margin: 14px 0 4px; }
+.pb-project:first-child { margin-top: 0; }
 .pb-station { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--line-deep); font-weight: 700; margin: 10px 0 2px; }
 .note-stats { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .fit-under { color: var(--warn); } .fit-over { color: var(--c-shinkansen); }

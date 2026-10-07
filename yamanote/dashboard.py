@@ -66,10 +66,6 @@ def state(factory) -> dict:
                       "untested": [p["name"] for p in factory.projects()
                                    if not settings.project_commands(p["path"])["test"]]},
         "autopilot_report": next((e for e in reversed(store.events(limit=500)) if e["kind"] == "autopilot_report"), None),
-        "retros": [{"item_id": r["item_id"], "title": r["title"], "ts": r["ts"], "outcome": r["outcome"],
-                    "class_fit": r["class_fit"], "summary": r["data"].get("summary", ""),
-                    "added": len(r["data"].get("notes_added") or []), "retired": len(r["data"].get("notes_retired") or [])}
-                   for r in store.recent_retros(8)],
         "checks": {p["path"]: settings.project_commands(p["path"]) for p in factory.projects()},
         "notify": {"enabled": bool(settings.NOTIFY_CMD or settings.NOTIFY_WEBHOOK),
                    "events": sorted(settings.NOTIFY_EVENTS)},
@@ -222,6 +218,23 @@ def make_handler(factory, broadcaster: Broadcaster):
                     days = max(1 / 24, min(365.0, days))
                     project = (qs.get("project") or [""])[0] or None
                     return self._json(stats.compute(factory.store, days, project))
+                if path == "/api/retros":
+                    try:
+                        limit = max(1, min(200, int((qs.get("limit") or ["50"])[0])))
+                        days = float((qs.get("days") or ["30"])[0])
+                    except ValueError:
+                        limit, days = 50, 30.0
+                    days = max(1 / 24, min(365.0, days))
+                    project = (qs.get("project") or [""])[0] or None
+                    since = time.time() - days * 86400
+                    rows = factory.store.recent_retros(100000, project, since)  # summary covers the whole range
+                    fits = {k: sum(1 for r in rows if r["class_fit"] == k) for k in ("right", "underpowered", "overpowered")}
+                    return self._json({"retros": rows[:limit], "days": days, "summary": {
+                        "count": len(rows), "class_fit": fits,
+                        "notes_added": sum(len(r["data"].get("notes_added") or []) for r in rows),
+                        "notes_retired": sum(len(r["data"].get("notes_retired") or []) for r in rows),
+                        "arrived": sum(1 for r in rows if r["outcome"] == "done"),
+                        "failed": sum(1 for r in rows if r["outcome"] == "failed")}})
                 if path == "/api/diagram":
                     hours = max(1, min(168, int((qs.get("hours") or ["12"])[0])))
                     since = time.time() - hours * 3600

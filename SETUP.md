@@ -126,7 +126,7 @@ Tell the user:
   and that the **Autopilot** switch (or a schedule in ⚙ Settings) runs the line unattended,
   with a "while you were away" report when it ends;
 - that every train ends at JY09 Retro, whose notes build up a per-station playbook for
-  the project; bad notes can be removed with × on the "Retrospectives & playbook" card;
+  the project; bad notes can be removed with × in the dashboard's Retro tab;
 - that spend is visible in the header bar and capped at the daily budget;
 - that the shell tool is not a hard sandbox, so Yamanote should run as an unprivileged
   user.
