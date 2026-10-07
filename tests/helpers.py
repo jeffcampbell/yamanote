@@ -12,6 +12,16 @@ os.environ.setdefault("YAMANOTE_DECIDE", "0")  # tests never call Jev unless the
 from yamanote import decisions, settings  # noqa: E402
 from yamanote.llm import Completion  # noqa: E402
 
+# The real .env (repo or ~/development) is loaded when settings is imported. Tests
+# must not inherit its side effects: a dashboard token, notification hooks that
+# message a real phone, restart/deploy commands. Tests that need one set it.
+for _name, _value in {"DASHBOARD_TOKEN": "", "NOTIFY_CMD": "", "NOTIFY_WEBHOOK": "", "PUBLIC_URL": "",
+                      "SERVICE_RESTART_CMD": "", "APP_LOG_GLOB": "", "RAILWAY_PROJECT": "",
+                      "SETUP_CMD": "", "TEST_CMD": "", "DECIDE_SRC": "", "AUTOPILOT": False,
+                      "AUTOPILOT_ON_CRON": "", "AUTOPILOT_OFF_CRON": "",
+                      "AUTOPILOT_MERGE_WITHOUT_TESTS": False}.items():
+    setattr(settings, _name, _value)
+
 
 def tool_call(name: str, args: dict, n: int = 0) -> dict:
     return {"id": f"call_{name}_{n}", "type": "function",
