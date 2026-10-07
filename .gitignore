@@ -2,3 +2,6 @@
 __pycache__/
 agents/
 run.sh
+projects.json
+models.json
+.DS_Store

@@ -1,0 +1,28 @@
+{
+  "projects": {
+    "my-app": {
+      "path": "~/development/my-app",
+      "priority": 1,
+      "setup": "npm ci",
+      "test": "npm test -- --watchAll=false",
+      "gates": {"spec": false, "merge": true}
+    },
+    "confidential-tool": {
+      "path": "~/development/confidential-tool",
+      "priority": 2,
+      "setup": "python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt",
+      "test": ".venv/bin/python -m pytest -q",
+      "decide_backend": "ollama"
+    },
+    "night-owl": {
+      "path": "~/development/night-owl",
+      "priority": 3,
+      "schedule": "22-6",
+      "test": "make test"
+    },
+    "retired": {
+      "path": "~/development/old-thing",
+      "paused": true
+    }
+  }
+}

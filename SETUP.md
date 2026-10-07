@@ -1,120 +1,125 @@
 # AI-Assisted Setup
 
-This file is written for an AI coding agent (Claude Code, Cursor, etc.) to follow. It will configure Yamanote to manage your project.
+This file is written for an AI coding agent to follow. It configures Yamanote to work
+on the user's project.
 
-**Human:** just tell your LLM to "follow SETUP.md" and it should do the rest.
+**Human:** tell your coding agent to "follow SETUP.md".
 
 ---
 
 ## Step 1: Check prerequisites
 
-Run these commands and verify they succeed:
-
 ```bash
 python3 --version   # need 3.11+
 git --version
-claude --version     # Claude Code CLI must be installed and authenticated
 ```
 
-If `claude` is not found, stop and tell the user to install Claude Code first: https://docs.anthropic.com/en/docs/claude-code
-
-## Step 2: Detect the target project
-
-Look for candidate projects to manage. Search for git repositories under `~/Development` (or the user's typical code directory):
+Check for an OpenRouter key without printing it:
 
 ```bash
-find ~/Development -maxdepth 2 -name ".git" -type d 2>/dev/null | sed 's|/.git$||'
+grep -l '^OPENROUTER_API_KEY=' .env ~/development/.env 2>/dev/null || echo "missing"
 ```
 
-Present the list to the user and ask:
-1. **Which project should agent-team manage?** (pick one from the list, or let them type a path)
-2. **Should agent-team restart a service after merging?** If yes, ask for the systemd service name (e.g. `my-app.service`). If no, leave it blank.
-3. **Would you like to enable the web dashboard?** It provides a real-time status page showing agent activity, pipeline progress, and backlog — accessible from any device on the local network. If yes, ask what port to use (default: `8080`). If no, skip it.
+If it's missing, ask the user to create one at https://openrouter.ai/keys and add
+`OPENROUTER_API_KEY=...` to `.env` themselves. Never echo key values. Recommend they
+also set a credit limit on the key in OpenRouter's settings as a backstop to
+Yamanote's own budgets.
 
-## Step 3: Write the `.env` file
+Jev is optional. It's available if `~/development/decide/src` exists and
+`TYPESAFE_API_KEY` is set. Without it, LLMs make its decisions instead.
 
-Copy `.env.example` to `.env` and fill in the values from Step 2:
+## Step 2: Choose the project
 
 ```bash
-cp .env.example .env
+find ~/development -maxdepth 2 -name .git -type d 2>/dev/null | sed 's|/.git$||'
 ```
 
-Edit `.env` with the detected/confirmed values. For example, if the user chose `~/Development/my-app` with service `my-app.service`:
+Ask the user:
+1. **Which project(s) should Yamanote work on?** (git repos under the dev dir). For more
+   than one, use `projects.json` (copy `projects.json.example`) instead of
+   `AGENT_TEAM_DEFAULT_PROJECT`; setup/test commands, gates and schedules then go there
+   per project.
+2. **Restart a service after merging?** If so, which command (e.g. `sudo systemctl restart my-app.service`)?
+3. **Human gates?** Approve specs before building, and/or approve merges? (Recommend the merge gate to start.)
+4. **Daily budget in USD?** (default 20)
+5. **Dashboard port?** (default 8080). Ask whether it must be reachable from other devices.
+   If yes, it needs `AGENT_TEAM_DASHBOARD_HOST=0.0.0.0` plus a token.
+6. **How are the project's dependencies installed and tests run?** Look for package.json,
+   pyproject.toml, requirements.txt, Makefile, etc. and propose a `setup` and `test`
+   command; confirm them with the user. Strongly recommended: the test command gates
+   every build and the merge queue.
+7. **Notifications?** Ask if they have a command or webhook that should receive alerts
+   (gate waits, failures, regressions, suspensions). If yes, set `AGENT_TEAM_NOTIFY_CMD`
+   or `AGENT_TEAM_NOTIFY_WEBHOOK` and `AGENT_TEAM_PUBLIC_URL` (see README "Notifications").
+
+## Step 3: Write `.env`
+
+`cp .env.example .env`, then set:
 
 ```
-AGENT_TEAM_DEV_DIR=~/Development
-AGENT_TEAM_DEFAULT_PROJECT=my-app
-AGENT_TEAM_SERVICE_RESTART_CMD=sudo systemctl restart my-app.service
+AGENT_TEAM_DEV_DIR=~/development
+AGENT_TEAM_DEFAULT_PROJECT=my-app        # directory name only
+AGENT_TEAM_SERVICE_RESTART_CMD=          # or the command from step 2
+AGENT_TEAM_GATE_MERGE=1                  # per the user's answer
+AGENT_TEAM_DAILY_BUDGET_USD=20
+AGENT_TEAM_DASHBOARD_PORT=8080
+AGENT_TEAM_SETUP_CMD=npm ci              # from question 6 (or per project in projects.json)
+AGENT_TEAM_TEST_CMD=npm test
 ```
 
-- `AGENT_TEAM_DEV_DIR` = the parent directory (e.g. `~/Development`)
-- `AGENT_TEAM_DEFAULT_PROJECT` = just the directory name, not the full path (e.g. `my-app`)
-- `AGENT_TEAM_SERVICE_RESTART_CMD` = leave empty or omit entirely if no service restart is needed
-- `AGENT_TEAM_DASHBOARD_PORT` = the port number if the user wants the dashboard (e.g. `8080`), or omit/set to `0` to disable
+If the dashboard is exposed, generate a token (`python3 -c "import secrets; print(secrets.token_urlsafe(24))"`),
+set `AGENT_TEAM_DASHBOARD_HOST=0.0.0.0` and `AGENT_TEAM_DASHBOARD_TOKEN=<token>`, and
+tell the user to keep the token somewhere safe. Don't print it again.
 
 ## Step 4: Validate
 
+Run the test command from question 6 once in the project itself and confirm it passes
+on the current trunk. A test command that already fails would send every train back
+for rework:
+
 ```bash
-source .env && python3 -c "import config; import orchestrator; print('OK')"
+cd ~/development/my-app && npm test; echo "exit $?"   # use the real command; expect exit 0
 ```
 
-Also confirm the resolved project directory exists:
+If it fails, tell the user and either fix the command or leave it unset for now.
+
+Then check the configuration:
 
 ```bash
-source .env && python3 -c "
-import config, os
-project = os.path.join(config.DEVELOPMENT_DIR, config.DEFAULT_PROJECT)
-assert os.path.isdir(project), f'Directory not found: {project}'
-assert os.path.isdir(os.path.join(project, '.git')), f'Not a git repo: {project}'
-print(f'Target project: {project}')
-print(f'Service restart: {config.SERVICE_RESTART_CMD or \"(disabled)\"}')
+python3 -m unittest discover -s tests -t . 2>&1 | tail -1     # expect OK
+set -a; source .env; set +a; python3 -c "
+from yamanote import settings, decisions
+from yamanote.factory import Factory, validate_project
+import os
+p = os.path.realpath(os.path.join(settings.DEVELOPMENT_DIR, settings.DEFAULT_PROJECT))
+print('project:', p, '->', validate_project(p) or 'OK')
+print('openrouter key:', 'set' if settings.openrouter_key() else 'MISSING')
+print('jev:', decisions.status())
 "
 ```
 
-If either check fails, go back to Step 3 and fix the values.
+Fix anything that isn't OK before continuing.
 
-## Step 5: Set up systemd service (optional)
+## Step 5: Run
 
-Ask the user if they want to run Yamanote as a systemd service. If yes:
+Ask whether to run it now or install it as a service.
 
-1. Read `agent-team.service` and update the paths to match this machine:
-   - `User=` should be the current user (`whoami`)
-   - `WorkingDirectory=` should be the absolute path to this agent-team repo
-   - `ExecStart=` should point to `orchestrator.py` in this repo
-   - `EnvironmentFile=` should point to the `.env` file in this repo
-   - `Environment=PATH=` must include the directory containing `claude` (run `which claude` to find it)
+- **Now:** `./start.sh` (the dashboard port comes from `.env`)
+- **systemd:** copy `agent-team.service`, set `User`, `WorkingDirectory`, `EnvironmentFile`
+  and the `ExecStart` path, then `sudo systemctl daemon-reload && sudo systemctl enable --now agent-team`.
+  If the restart command uses sudo, add a sudoers rule for exactly that command.
 
-2. Copy and enable:
-   ```bash
-   sudo cp agent-team.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable agent-team
-   ```
+## Step 6: Hand off
 
-3. If `AGENT_TEAM_SERVICE_RESTART_CMD` uses `sudo`, set up passwordless sudo:
-   ```bash
-   # Replace <user> and <service> with actual values
-   echo '<user> ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart <service>' | sudo tee /etc/sudoers.d/agent-team
-   sudo chmod 440 /etc/sudoers.d/agent-team
-   ```
-
-4. Start it:
-   ```bash
-   sudo systemctl start agent-team
-   systemctl status agent-team
-   ```
-
-## Step 6: Confirm it's working
-
-If running as a service:
-```bash
-journalctl -u agent-team -n 20 --no-pager
-```
-
-If running manually:
-```bash
-source .env && python3 orchestrator.py
-# Watch for the ORCHESTRATOR STARTING banner, then Ctrl+C to stop
-```
-
-Tell the user: "Yamanote is set up and managing `<project-name>`. It will start generating specs and implementing features autonomously. Monitor progress with `tail -f agents/activity.log`."
+Tell the user:
+- the dashboard URL (it works on a phone too);
+- that "+ New request" adds work by hand (it skips triage), and "Pause line" stops new
+  departures;
+- that with the merge gate on, trains stop at JY07 with a red signal until they click
+  Approve, and that the merge queue re-runs the tests on branch + latest trunk before
+  anything lands;
+- that every train ends at JY09 Retro, whose notes build up a per-station playbook for
+  the project; bad notes can be removed with × on the "Retrospectives & playbook" card;
+- that spend is visible in the header bar and capped at the daily budget;
+- that the shell tool is not a hard sandbox, so Yamanote should run as an unprivileged
+  user.

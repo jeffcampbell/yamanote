@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#161a17">
+<title>Yamanote</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='6' width='28' height='20' rx='10' fill='none' stroke='%239acd32' stroke-width='4'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <h1>YAMANOTE</h1>
+    <span class="brand-sub">software factory · 山手線</span>
+  </div>
+  <div class="topbar-status">
+    <span id="line-status" class="pill pill-ok">● In service</span>
+    <div class="budget" title="OpenRouter + Jev spend today">
+      <div class="budget-label"><span id="budget-spent">$0.00</span> / <span id="budget-limit">$0</span> today</div>
+      <div class="budget-bar"><div id="budget-fill"></div></div>
+    </div>
+    <span id="clock" class="clock"></span>
+  </div>
+  <div class="topbar-actions">
+    <button id="btn-new" class="btn btn-primary">+ New request</button>
+    <button id="btn-pause" class="btn">Pause line</button>
+  </div>
+</header>
+<div id="conn-lost" class="conn-lost" hidden>Connection to the orchestrator lost — retrying…</div>
+<div id="suspended-banner" class="banner banner-warn" hidden></div>
+
+<main>
+  <section class="loop-card card">
+    <div class="loop-wrap">
+      <svg id="loop" viewBox="0 0 1000 400" role="img" aria-label="Line map: work items as trains travelling between stations">
+        <defs>
+          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <path id="track-bed" d="M 230 80 H 770 A 120 120 0 0 1 770 320 H 230 A 120 120 0 0 1 230 80 Z"/>
+        <path id="track" d="M 230 80 H 770 A 120 120 0 0 1 770 320 H 230 A 120 120 0 0 1 230 80 Z"/>
+        <g id="stations"></g>
+        <g id="trains"></g>
+        <g id="loop-center" transform="translate(500 200)">
+          <text class="center-kicker" y="-58">ON THE LINE</text>
+          <text id="center-count" class="center-big" y="-8">0</text>
+          <text id="center-sub" class="center-sub" y="24">trains running</text>
+        </g>
+      </svg>
+      <div id="train-tip" class="train-tip" hidden></div>
+    </div>
+    <ol id="line-list" class="line-list" aria-label="Stations and trains"></ol>
+    <div class="kpis" id="kpis"></div>
+  </section>
+
+  <section class="card diagram-card">
+    <div class="diagram-head">
+      <h3>Train diagram <span class="muted small">ダイヤ · time × station</span></h3>
+      <div class="board-tabs light" role="tablist">
+        <button class="tab active" data-hours="3">3h</button>
+        <button class="tab" data-hours="12">12h</button>
+        <button class="tab" data-hours="24">24h</button>
+        <button class="tab" data-hours="168">7d</button>
+      </div>
+    </div>
+    <div class="diagram-wrap"><svg id="diagram" role="img" aria-label="Train diagram: each work item's journey through the stations over time"></svg></div>
+    <p class="small muted diagram-legend">Each line is a train. Lines climb down the stations as work progresses; a dashed line jumping back up is a rework. ● arrived · ✕ terminated · ▮ now.</p>
+  </section>
+
+  <section class="boards">
+    <div class="board card-dark">
+      <div class="board-head">
+        <div><h2>DEPARTURES</h2><div class="board-sub">発車 · on the line and waiting</div></div>
+        <div class="board-tabs" role="tablist">
+          <button class="tab active" data-filter="line">On the line</button>
+          <button class="tab" data-filter="waiting">Platform</button>
+          <button class="tab" data-filter="held">Held</button>
+        </div>
+      </div>
+      <div class="board-table">
+        <div class="board-row board-cols">
+          <span>TRAIN</span><span>SERVICE</span><span>DESTINATION</span><span>NOW AT</span><span>STATUS</span><span class="num">TRIP</span><span class="num">FARE</span>
+        </div>
+        <div id="departures"></div>
+      </div>
+    </div>
+    <div class="board card-dark">
+      <div class="board-head">
+        <div><h2>ARRIVALS</h2><div class="board-sub">到着 · terminus</div></div>
+        <div class="board-tabs" role="tablist">
+          <button class="tab active" data-afilter="all">All</button>
+          <button class="tab" data-afilter="done">Arrived</button>
+          <button class="tab" data-afilter="dropped">Cancelled</button>
+        </div>
+      </div>
+      <div class="board-table">
+        <div class="board-row board-cols arr">
+          <span>TRAIN</span><span>STATUS</span><span>DESTINATION</span><span class="num">TRIP</span><span class="num">FARE</span><span class="num">TIME</span>
+        </div>
+        <div id="arrivals"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="lower">
+    <div class="card crew">
+      <h3>Crew &amp; signals</h3>
+      <div id="crew"></div>
+    </div>
+    <div class="card routing">
+      <h3>Service classes &amp; routing</h3>
+      <div id="routing"></div>
+    </div>
+    <div class="card learning">
+      <h3>Retrospectives &amp; playbook <span class="muted small">振り返り</span></h3>
+      <div id="learning"></div>
+    </div>
+    <div class="card feed">
+      <h3>Line announcements <span class="muted small">車内放送</span></h3>
+      <ol id="feed"></ol>
+    </div>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer" aria-hidden="true">
+  <div class="drawer-inner">
+    <button class="drawer-close" id="drawer-close" aria-label="Close">×</button>
+    <div id="drawer-body"></div>
+  </div>
+</aside>
+<div id="scrim" class="scrim" hidden></div>
+
+<dialog id="new-dialog">
+  <form id="new-form" method="dialog">
+    <h3>New request</h3>
+    <p class="muted small">Human requests skip the triage gate and go straight to Spec.</p>
+    <label>Title <input name="title" required maxlength="80" placeholder="e.g. add-csv-export"></label>
+    <label>What should change, and why?
+      <textarea name="description" rows="6" required placeholder="Describe the outcome you want. Acceptance criteria and holdout scenarios are written at the Spec station."></textarea>
+    </label>
+    <div class="form-row">
+      <label>Kind <select name="kind"><option>feature</option><option>bug</option><option>chore</option></select></label>
+      <label>Priority <select name="priority"><option>high</option><option selected>medium</option><option>low</option></select></label>
+    </div>
+    <label>Project <select name="project" id="project-select"></select></label>
+    <div id="token-row" hidden><label>Dashboard token <input name="token" type="password" autocomplete="off"></label></div>
+    <p id="new-error" class="error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="new-cancel">Cancel</button>
+      <button type="submit" class="btn btn-primary">Dispatch</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

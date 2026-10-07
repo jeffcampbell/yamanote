@@ -130,6 +130,12 @@ class Metrics:
             "1 if the orchestrator is in rate-limit sleep mode, else 0.",
         )
     )
+    spend_24h_usd: _Gauge = field(
+        default_factory=lambda: _Gauge(
+            "yamanote_spend_24h_usd",
+            "OpenRouter + Jev spend over the past 24 hours, in USD.",
+        )
+    )
     uptime_seconds: _Gauge = field(
         default_factory=lambda: _Gauge(
             "yamanote_uptime_seconds",
@@ -152,6 +158,7 @@ _GAUGES = [
     "trains_active",
     "launches_last_hour",
     "sleep_mode_active",
+    "spend_24h_usd",
     "uptime_seconds",
 ]
 
